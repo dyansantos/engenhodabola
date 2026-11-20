@@ -95,7 +95,6 @@
         "method",
         "amountCents",
         "paidAt",
-        "dateKey",
         "staffUid",
         "staffName",
         "sourcePaymentId",

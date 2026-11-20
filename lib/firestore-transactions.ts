@@ -25,7 +25,6 @@ import {
   GroupPaymentAllocation,
   ReceiptDocument,
 } from './types';
-import { getSaoPauloDateKey } from './formatters';
 import { buildDeterministicReceiptId } from './reports/receipts';
 
 export const methodLabels: Record<PaymentMethod, string> = {
@@ -537,7 +536,6 @@ export async function atomicRegisterPayment(params: {
 
     const now = new Date();
     const nowIso = now.toISOString();
-    const dateKey = getSaoPauloDateKey(now);
     let changeCents = 0;
     let tenderedCents = params.tenderedCents;
 
@@ -596,7 +594,6 @@ export async function atomicRegisterPayment(params: {
         method: params.method,
         amountCents: params.amountCents, // Troco nunca entra como receita
         paidAt: serverTimestamp(),
-        dateKey,
         staffUid: params.operatorUid,
         staffName: params.operatorName,
         sourcePaymentId: newPayment.id,
@@ -1178,7 +1175,6 @@ export async function atomicRegisterGroupPayment(params: {
 
     const now = new Date();
     const nowIso = now.toISOString();
-    const dateKey = getSaoPauloDateKey(now);
 
     // 3. Se houver pagamento vinculado de bar, validar comanda já lida no mesmo ciclo atômico
     let barComandaToUpdate: Comanda | null = null;
@@ -1367,7 +1363,6 @@ export async function atomicRegisterGroupPayment(params: {
         method: params.method,
         amountCents: totalRentalAmountPaid, // Somente parcela da quadra; troco nunca entra
         paidAt: sharedServerPaidAt,
-        dateKey,
         staffUid: params.operatorUid,
         staffName: params.operatorName,
         ...(isJointOperation ? { jointPaymentId: params.clientNonce } : {}),
@@ -1390,7 +1385,6 @@ export async function atomicRegisterGroupPayment(params: {
         method: params.method,
         amountCents: barPaymentAmountCents,
         paidAt: sharedServerPaidAt,
-        dateKey,
         staffUid: params.operatorUid,
         staffName: params.operatorName,
         jointPaymentId: params.clientNonce,

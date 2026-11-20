@@ -193,7 +193,7 @@ service cloud.firestore {
     function validReceiptPayload(receiptId, data) {
       return data.keys().hasAll([
           'id', 'origin', 'refId', 'refNumber', 'refLabel', 'method',
-          'amountCents', 'paidAt', 'dateKey', 'staffUid', 'staffName',
+          'amountCents', 'paidAt', 'staffUid', 'staffName',
           'sourcePaymentId', 'kind'
         ])
         && data.keys().hasOnly([
@@ -209,7 +209,7 @@ service cloud.firestore {
         && data.method in ['dinheiro', 'pix', 'debito', 'credito']
         && data.amountCents is int && data.amountCents > 0
         && data.paidAt is timestamp
-        && data.dateKey is string && data.dateKey.matches('^\\d{4}-\\d{2}-\\d{2}$')
+        && (!('dateKey' in data) || (data.dateKey is string && data.dateKey.matches('^\\d{4}-\\d{2}-\\d{2}$')))
         && data.staffUid is string && data.staffUid.size() <= 128
         && data.staffName is string && data.staffName.size() > 0 && data.staffName.size() <= 128
         && data.sourcePaymentId is string && data.sourcePaymentId.size() > 0 && data.sourcePaymentId.size() <= 128
@@ -231,7 +231,7 @@ service cloud.firestore {
         && data.kind == 'recebimento'
         && data.staffUid == request.auth.uid
         && data.paidAt == request.time
-        && data.dateKey == saoPauloDateKey(request.time)
+        && !('dateKey' in data)
         && (
           (data.origin == 'comanda'
             && exists(/databases/$(database)/documents/comandas/$(data.refId))
@@ -257,7 +257,7 @@ service cloud.firestore {
       return isAdmin()
         && data.kind == 'recebimento'
         && data.paidAt <= request.time
-        && data.dateKey == saoPauloDateKey(data.paidAt)
+        && (!('dateKey' in data) || data.dateKey == saoPauloDateKey(data.paidAt))
         && (
           (data.origin == 'comanda' && exists(/databases/$(database)/documents/comandas/$(data.refId))) ||
           (data.origin == 'locacao' && exists(/databases/$(database)/documents/group_rentals/$(data.refId)))

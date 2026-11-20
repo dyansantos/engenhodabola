@@ -78,7 +78,7 @@ import {
   getSaoPauloDateKey,
 } from '@/lib/formatters';
 import {
-  loadComandasFromStorage,
+  loadRealLocalBackupComandas,
   getRawStorageDataForExport,
   attemptRecoverStorage,
 } from '@/lib/storage';
@@ -422,12 +422,11 @@ export function ComandasProvider({ children }: { children: ReactNode }) {
   // Rastreamento da data de hoje no fuso America/Sao_Paulo
   const [currentSaoPauloDay, setCurrentSaoPauloDay] = useState<string>(() => getSaoPauloDateKey());
 
-  // Rastreamento de backup local remanescente
+  // Rastreamento de backup local operacional real remanescente (ignora exemplos de demonstração)
   const [localBackupCount, setLocalBackupCount] = useState<number>(() => {
     if (typeof window === 'undefined') return 0;
     try {
-      const local = loadComandasFromStorage();
-      return local.status === 'ok' ? local.comandas.length : 0;
+      return loadRealLocalBackupComandas().length;
     } catch {
       return 0;
     }
@@ -679,17 +678,18 @@ export function ComandasProvider({ children }: { children: ReactNode }) {
     return res;
   };
 
-  // Importação administrativa de dados locais recuperados
+  // Importação administrativa apenas de backups operacionais reais (nunca importa exemplos)
   const adminImportLocalData = async () => {
     if (currentStaff?.role !== 'admin') {
       return { success: false, error: 'Apenas Administradores podem homologar e importar dados.' };
     }
-    const local = loadComandasFromStorage();
-    if (local.status !== 'ok' || local.comandas.length === 0) {
-      return { success: false, error: 'Nenhum dado local válido encontrado para importação.' };
+    const realComandas = loadRealLocalBackupComandas();
+    if (realComandas.length === 0) {
+      setLocalBackupCount(0);
+      return { success: false, error: 'Nenhum backup operacional real encontrado para importação.' };
     }
 
-    const res = await adminImportRecoveredComandas(local.comandas, currentStaff.name);
+    const res = await adminImportRecoveredComandas(realComandas, currentStaff.name);
     if (res.success) {
       setLocalBackupCount(0);
     }

@@ -14,7 +14,8 @@ import {
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { sanitizeForFirestore } from '@/lib/firestore-transactions';
-import { getSaoPauloDateKey } from '@/lib/formatters';
+import { getSaoPauloDateKey, SAO_PAULO_TZ } from '@/lib/formatters';
+import { addDaysToDateKey } from './aggregate';
 import {
   Comanda,
   GroupRental,
@@ -100,9 +101,86 @@ function parseFirestoreDate(raw: unknown): Date | null {
 }
 
 /**
+ * Converte uma chave de data `YYYY-MM-DD` no instante UTC exato correspondente a
+ * `00:00:00.000` em `America/Sao_Paulo` (suportando inclusive datas históricas com horário de verão).
+ */
+export function getSaoPauloDayStartUtc(dateKey: string): Date {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
+    throw new Error(`Chave de data inválida para America/Sao_Paulo: "${dateKey}".`);
+  }
+  const [year, month, day] = dateKey.split('-').map(Number);
+  const check = new Date(Date.UTC(year, month - 1, day));
+  if (
+    check.getUTCFullYear() !== year ||
+    check.getUTCMonth() + 1 !== month ||
+    check.getUTCDate() !== day
+  ) {
+    throw new Error(`Data inexistente no calendário: "${dateKey}".`);
+  }
+
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: SAO_PAULO_TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  });
+
+  // Palpite inicial em UTC-3 (fuso padrão de São Paulo)
+  let utcMs = Date.UTC(year, month - 1, day, 3, 0, 0, 0);
+  const targetLocalAsUtcMs = Date.UTC(year, month - 1, day, 0, 0, 0, 0);
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const parts = formatter.formatToParts(new Date(utcMs));
+    const getPart = (type: string) => Number(parts.find(p => p.type === type)?.value ?? '0');
+    const localYear = getPart('year');
+    const localMonth = getPart('month');
+    const localDay = getPart('day');
+    const localHour = getPart('hour');
+    const localMinute = getPart('minute');
+    const localSecond = getPart('second');
+
+    const observedLocalAsUtcMs = Date.UTC(
+      localYear,
+      localMonth - 1,
+      localDay,
+      localHour,
+      localMinute,
+      localSecond,
+      0
+    );
+    const diffMs = targetLocalAsUtcMs - observedLocalAsUtcMs;
+    if (diffMs === 0) break;
+    utcMs += diffMs;
+  }
+
+  return new Date(utcMs);
+}
+
+/**
+ * Calcula o intervalo semiaberto `[startUtc, endExclusiveUtc)` em UTC correspondente
+ * ao período fechado `[startDateKey, endDateKey]` no fuso `America/Sao_Paulo`.
+ * - `startUtc`: 00:00:00.000 de `startDateKey` em São Paulo (inclusive)
+ * - `endExclusiveUtc`: 00:00:00.000 do dia seguinte a `endDateKey` em São Paulo (exclusivo)
+ */
+export function getSaoPauloDateRangeBounds(
+  startDateKey: string,
+  endDateKey: string
+): { startUtc: Date; endExclusiveUtc: Date } {
+  const startUtc = getSaoPauloDayStartUtc(startDateKey);
+  const nextAfterEndKey = addDaysToDateKey(endDateKey, 1);
+  const endExclusiveUtc = getSaoPauloDayStartUtc(nextAfterEndKey);
+  return { startUtc, endExclusiveUtc };
+}
+
+/**
  * Converte documentos da coleção `receipts` em linhas canônicas de relatório.
- * Qualquer documento com campo inválido ou divergência de dateKey vai para `issues`
- * e nunca recebe fallback silencioso.
+ * O dia (`dateKey`) é sempre derivado de `paidAt` em `America/Sao_Paulo`.
+ * Documentos legados que armazenam `dateKey` continuam compatíveis; se `dateKey` estiver
+ * presente mas malformado ou divergente de `paidAt`, o registro vai para `issues`.
  */
 export function mapReceiptDocsToLines(rawDocs: RawReceiptDoc[]): {
   lines: ReceiptLine[];
@@ -230,29 +308,31 @@ export function mapReceiptDocsToLines(rawDocs: RawReceiptDoc[]): {
     }
 
     const computedDateKey = getSaoPauloDateKey(paidAtDate);
-    const storedDateKey = typeof d.dateKey === 'string' ? d.dateKey.trim() : '';
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(storedDateKey)) {
-      issues.push({
-        id: docId,
-        origin,
-        refId,
-        refNumber,
-        refLabel,
-        reason: `dateKey ausente ou inválido: "${String(d.dateKey)}".`,
-      });
-      continue;
-    }
+    if (d.dateKey !== undefined && d.dateKey !== null) {
+      const storedDateKey = typeof d.dateKey === 'string' ? d.dateKey.trim() : '';
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(storedDateKey)) {
+        issues.push({
+          id: docId,
+          origin,
+          refId,
+          refNumber,
+          refLabel,
+          reason: `dateKey legado inválido: "${String(d.dateKey)}".`,
+        });
+        continue;
+      }
 
-    if (storedDateKey !== computedDateKey) {
-      issues.push({
-        id: docId,
-        origin,
-        refId,
-        refNumber,
-        refLabel,
-        reason: `Inconsistência de data: dateKey="${storedDateKey}" diverge de paidAt em America/Sao_Paulo ("${computedDateKey}").`,
-      });
-      continue;
+      if (storedDateKey !== computedDateKey) {
+        issues.push({
+          id: docId,
+          origin,
+          refId,
+          refNumber,
+          refLabel,
+          reason: `Inconsistência de data: dateKey="${storedDateKey}" diverge de paidAt em America/Sao_Paulo ("${computedDateKey}").`,
+        });
+        continue;
+      }
     }
 
     const staffName =
@@ -289,7 +369,8 @@ export function mapReceiptDocsToLines(rawDocs: RawReceiptDoc[]): {
 }
 
 /**
- * Consulta paginada na coleção `receipts` por intervalo fechado de `dateKey` [startDateKey, endDateKey].
+ * Consulta paginada na coleção `receipts` pelo intervalo de `paidAt` no fuso `America/Sao_Paulo`:
+ * `[início de startDateKey (inclusive), início do dia seguinte a endDateKey (exclusivo))`.
  * Busca TODAS as páginas do período sem limite silencioso.
  * Propaga erro em caso de falha de permissão ou consulta.
  */
@@ -307,6 +388,9 @@ export async function fetchReceiptsByDateRange(
     return { lines: [], issues: [], pagesFetched: 0, totalDocsFetched: 0 };
   }
 
+  const { startUtc, endExclusiveUtc } = getSaoPauloDateRangeBounds(startDateKey, endDateKey);
+  const startTimestamp = Timestamp.fromDate(startUtc);
+  const endExclusiveTimestamp = Timestamp.fromDate(endExclusiveUtc);
   const receiptsCol = collection(db, 'receipts');
 
   const { items: rawDocs, pagesFetched } = await paginateAll<
@@ -316,17 +400,17 @@ export async function fetchReceiptsByDateRange(
     const q = cursor
       ? query(
           receiptsCol,
-          where('dateKey', '>=', startDateKey),
-          where('dateKey', '<=', endDateKey),
-          orderBy('dateKey', 'asc'),
+          where('paidAt', '>=', startTimestamp),
+          where('paidAt', '<', endExclusiveTimestamp),
+          orderBy('paidAt', 'asc'),
           startAfter(cursor),
           limit(size)
         )
       : query(
           receiptsCol,
-          where('dateKey', '>=', startDateKey),
-          where('dateKey', '<=', endDateKey),
-          orderBy('dateKey', 'asc'),
+          where('paidAt', '>=', startTimestamp),
+          where('paidAt', '<', endExclusiveTimestamp),
+          orderBy('paidAt', 'asc'),
           limit(size)
         );
 
@@ -498,7 +582,6 @@ export function planHistoricalBackfill(params: {
         method: line.method,
         amountCents: line.amountCents,
         paidAtDate,
-        dateKey: getSaoPauloDateKey(paidAtDate),
         staffUid: line.operatorUid || adminUid,
         staffName: (line.operatorName || adminName).slice(0, 128),
         ...(jointPaymentId ? { jointPaymentId } : {}),

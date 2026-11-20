@@ -16,8 +16,8 @@ import {
   addItemHelper,
   registerPaymentHelper,
   transferItemsHelper,
+  loadRealLocalBackupComandas,
 } from '../lib/storage';
-import { INITIAL_COMANDAS, INITIAL_PRODUCTS } from '../lib/mock-data';
 import { calculateComandaTotals } from '../lib/formatters';
 import { Comanda, Product } from '../lib/types';
 
@@ -172,11 +172,21 @@ async function runTests() {
     }
   }
 
-  // TESTE 1: Criar uma comanda retorna o registro realmente salvo
+  // TESTE 1: Primeira execução limpa começa vazia (sem dados fictícios) e criar comanda persiste exatamente o registro salvo
   {
     mockStorage.clear();
     const engine = new SimulatedComandasEngine();
     await engine.init();
+
+    assert(engine.comandas.length === 0, '1.0 Primeira execução limpa inicia sem comandas fictícias');
+    assert(
+      mockStorage.getItem(STORAGE_KEY_COMANDAS) === null,
+      '1.0b Primeira execução limpa não grava comandas de exemplo no localStorage'
+    );
+    assert(
+      loadRealLocalBackupComandas().length === 0,
+      '1.0c Backup local real reporta 0 registros em navegador limpo'
+    );
 
     const initialCount = engine.comandas.length;
     const res = await engine.createComanda({
@@ -391,20 +401,32 @@ async function runTests() {
     );
     mockStorage.failNextSetItem = false;
 
-    // Restauração com confirmação explícita e sucesso de gravação
+    // Restauração com confirmação explícita e sucesso de gravação (reinicia com lista vazia, nunca exemplos)
     const successRestore = restoreDefaultsConfirmed();
     assert(successRestore.success === true, '8.3 restoreDefaultsConfirmed conclui com sucesso');
     const storedAfter = JSON.parse(mockStorage.getItem(STORAGE_KEY_COMANDAS)!);
     assert(
-      storedAfter.version === STORAGE_VERSION && Array.isArray(storedAfter.comandas),
-      '8.4 Exemplos gravados apenas após confirmação explícita com sucesso de gravação'
+      storedAfter.version === STORAGE_VERSION &&
+        Array.isArray(storedAfter.comandas) &&
+        storedAfter.comandas.length === 0,
+      '8.4 Reinicialização grava lista vazia (sem comandas fictícias) após confirmação explícita'
     );
   }
 
   // TESTE 9: React Strict Mode compatibilidade & ausência de efeitos colaterais em atualizadores
   {
     // Verificar que helpers de domínio são puros e não dependem de re-execuções
-    const initialCmd = INITIAL_COMANDAS[0];
+    const initialCmd: Comanda = {
+      id: 'cmd-pure-test',
+      number: 201,
+      type: 'individual',
+      name: 'Teste Pureza',
+      status: 'aberta',
+      openedAt: '2026-11-18T15:00:00.000Z',
+      items: [],
+      payments: [],
+      history: [],
+    };
     const initialItemsCount = initialCmd.items.length;
 
     const prod: Product = { id: 'p-test', name: 'Teste Puro', category: 'Bebidas', priceCents: 1000 };

@@ -1,6 +1,69 @@
 import { Comanda, Product, ComandaItem, PaymentRecord, ComandaHistoryEntry } from './types';
-import { INITIAL_COMANDAS, INITIAL_PRODUCTS } from './mock-data';
+import { INITIAL_PRODUCTS } from './mock-data';
 import { calculateComandaTotals, formatCents } from './formatters';
+
+const DEMO_COMANDA_SIGNATURES: ReadonlyMap<string, string> = new Map([
+  ['cmd-101', 'Turma do Beach Tennis'],
+  ['cmd-102', 'Lucas Silveira'],
+  ['cmd-103', 'Pelada Society — Quarta Show'],
+  ['cmd-104', 'Mariana Costa'],
+  ['cmd-105', 'Carlos Henrique (Ontem)'],
+  ['cmd-106', 'Diogo Alcantara (Aberta Ontem)'],
+]);
+
+/**
+ * Identifica se uma comanda salva anteriormente no localStorage corresponde
+ * aos dados fixos de demonstração (INITIAL_COMANDAS) de versões antigas.
+ * Preserva backups operacionais reais criados no navegador.
+ */
+export function isDemoComanda(comanda: Comanda): boolean {
+  if (!comanda || typeof comanda !== 'object') return false;
+  if (comanda.lastModifiedByUid) return false;
+
+  const expectedDemoName = DEMO_COMANDA_SIGNATURES.get(comanda.id);
+  if (!expectedDemoName || comanda.name !== expectedDemoName) {
+    return false;
+  }
+
+  const hasRealPaymentOperator = (comanda.payments || []).some(
+    p => Boolean(p.operatorUid) || (Boolean(p.operator) && p.operator !== 'Operador de demonstração')
+  );
+  if (hasRealPaymentOperator) return false;
+
+  const hasRealHistoryOperator = (comanda.history || []).some(
+    h => Boolean(h.operatorUid) || (Boolean(h.operator) && h.operator !== 'Operador de demonstração')
+  );
+  if (hasRealHistoryOperator) return false;
+
+  return true;
+}
+
+/**
+ * Filtra apenas comandas de operação real (exclui registros legados de demonstração).
+ */
+export function filterRealBackupComandas(comandas: Comanda[]): Comanda[] {
+  return (comandas || []).filter(c => !isDemoComanda(c));
+}
+
+/**
+ * Lê comandas de backup operacional real do localStorage sem semear dados fictícios.
+ * Retorna lista vazia se não houver backup local ou se o conteúdo for apenas demonstração.
+ */
+export function loadRealLocalBackupComandas(): Comanda[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const hasLocalKey =
+      localStorage.getItem(STORAGE_KEY_COMANDAS) !== null ||
+      localStorage.getItem(LEGACY_STORAGE_KEY_COMANDAS) !== null;
+    if (!hasLocalKey) return [];
+
+    const local = loadComandasFromStorage();
+    if (local.status !== 'ok') return [];
+    return filterRealBackupComandas(local.comandas);
+  } catch {
+    return [];
+  }
+}
 
 export const STORAGE_VERSION = 'v2_cents';
 export const STORAGE_KEY_COMANDAS = 'engenho_bola_comandas_v2';
@@ -281,12 +344,12 @@ function tryMigrateLegacyComanda(raw: any, index: number): Comanda | null {
 
 /**
  * Lê e valida os dados do armazenamento local.
- * CRÍTICO: Dados de exemplo só são criados automaticamente quando NÃO HÁ dados anteriores (primeira execução limpa).
+ * Primeira execução limpa retorna lista vazia (nunca semeia comandas fictícias).
  * Qualquer situação inválida (JSON corrompido, versão desconhecida, campos inválidos) gera 'corrupted' preservando o original.
  */
 export function loadComandasFromStorage(): StorageLoadResult {
   if (typeof window === 'undefined') {
-    return { status: 'ok', comandas: INITIAL_COMANDAS };
+    return { status: 'ok', comandas: [] };
   }
 
   try {
@@ -415,18 +478,8 @@ export function loadComandasFromStorage(): StorageLoadResult {
       return { status: 'ok', comandas: migrated, migratedFromLegacy: true };
     }
 
-    // 3. Primeira execução limpa: nenhuma chave (v2 ou v1) existia
-    const initRes = saveComandasToStorage(INITIAL_COMANDAS);
-    if (!initRes.success) {
-      return {
-        status: 'corrupted',
-        error: `Não foi possível inicializar o armazenamento com os dados padrão: ${initRes.error}`,
-        reason: 'v2_schema_invalid',
-        sourceKey: STORAGE_KEY_COMANDAS,
-      };
-    }
-    saveProductsToStorage(INITIAL_PRODUCTS);
-    return { status: 'ok', comandas: INITIAL_COMANDAS };
+    // 3. Primeira execução limpa: nenhuma chave (v2 ou v1) existia -> nunca semear comandas fictícias
+    return { status: 'ok', comandas: [] };
   } catch (e) {
     return {
       status: 'corrupted',
@@ -608,7 +661,7 @@ export function getRawStorageDataForExport(): { filename: string; content: strin
 }
 
 /**
- * Restaura os exemplos apenas após confirmação explícita.
+ * Reinicia o armazenamento local para lista vazia de comandas apenas após confirmação explícita.
  * Trata erros de armazenamento: NÃO apaga registros originais antes de confirmar a gravação.
  */
 export function restoreDefaultsConfirmed(): {
@@ -617,12 +670,12 @@ export function restoreDefaultsConfirmed(): {
   products?: Product[];
   error?: string;
 } {
-  // 1. Tentar salvar comandas padrão primeiro (não apaga nada antes da gravação ter sucesso!)
-  const saveComandasRes = saveComandasToStorage(INITIAL_COMANDAS);
+  // 1. Tentar gravar lista vazia primeiro (não apaga nada antes da gravação ter sucesso!)
+  const saveComandasRes = saveComandasToStorage([]);
   if (!saveComandasRes.success) {
     return {
       success: false,
-      error: `Não foi possível gravar as comandas padrão: ${saveComandasRes.error}. Os dados existentes foram mantidos intactos.`,
+      error: `Não foi possível reiniciar o armazenamento de comandas: ${saveComandasRes.error}. Os dados existentes foram mantidos intactos.`,
     };
   }
 
@@ -630,7 +683,7 @@ export function restoreDefaultsConfirmed(): {
   if (!saveProductsRes.success) {
     return {
       success: false,
-      error: `Não foi possível gravar os produtos padrão: ${saveProductsRes.error}.`,
+      error: `Não foi possível gravar os produtos base: ${saveProductsRes.error}.`,
     };
   }
 
@@ -646,7 +699,7 @@ export function restoreDefaultsConfirmed(): {
 
   return {
     success: true,
-    comandas: INITIAL_COMANDAS,
+    comandas: [],
     products: INITIAL_PRODUCTS,
   };
 }
@@ -688,7 +741,7 @@ export function saveProductsToStorage(products: Product[]): { success: boolean; 
 export function resetStorageToDefaults(): { comandas: Comanda[]; products: Product[]; success: boolean; error?: string } {
   const res = restoreDefaultsConfirmed();
   return {
-    comandas: res.comandas || INITIAL_COMANDAS,
+    comandas: res.comandas || [],
     products: res.products || INITIAL_PRODUCTS,
     success: res.success,
     error: res.error,

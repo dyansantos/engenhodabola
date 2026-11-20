@@ -5,6 +5,8 @@ import {
   buildReceiptLines,
 } from './receipts';
 import {
+  getSaoPauloDateRangeBounds,
+  getSaoPauloDayStartUtc,
   mapReceiptDocsToLines,
   paginateAll,
   planHistoricalBackfill,
@@ -627,6 +629,82 @@ describe('Livro `receipts` (Fase 2) — IDs, Paginação, Mapeamento e Backfill 
     expect(agg.totals.byMethodCents.pix).toBe(3000);
   });
 
+  it('mapReceiptDocsToLines aceita recebimentos novos SEM dateKey e deriva o dia a partir de paidAt na virada da meia-noite de São Paulo', () => {
+    const beforeMidnightSp = {
+      toDate: () => new Date('2026-11-19T02:59:59.999Z'), // 18/11 23:59:59.999 SP
+    };
+    const exactMidnightSp = {
+      toDate: () => new Date('2026-11-19T03:00:00.000Z'), // 19/11 00:00:00.000 SP
+    };
+
+    const { lines, issues } = mapReceiptDocsToLines([
+      {
+        id: 'rcpt-sem-datekey-2359',
+        data: {
+          id: 'rcpt-sem-datekey-2359',
+          origin: 'comanda',
+          refId: 'cmd-20',
+          refNumber: 20,
+          refLabel: 'Mesa 05',
+          method: 'pix',
+          amountCents: 2500,
+          paidAt: beforeMidnightSp,
+          staffUid: 'op-1',
+          staffName: 'Maria',
+          sourcePaymentId: 'pay-2359',
+          kind: 'recebimento',
+        },
+      },
+      {
+        id: 'rcpt-sem-datekey-0000',
+        data: {
+          id: 'rcpt-sem-datekey-0000',
+          origin: 'locacao',
+          refId: 'gr-20',
+          refNumber: 520,
+          refLabel: 'Pelada (Areia 1)',
+          method: 'dinheiro',
+          amountCents: 4000,
+          paidAt: exactMidnightSp,
+          staffUid: 'op-1',
+          staffName: 'Maria',
+          sourcePaymentId: 'pay-0000',
+          kind: 'recebimento',
+        },
+      },
+    ]);
+
+    expect(issues).toHaveLength(0);
+    expect(lines).toHaveLength(2);
+    expect(lines[0].dateKey).toBe('2026-11-18');
+    expect(lines[1].dateKey).toBe('2026-11-19');
+
+    const agg18 = aggregateReceipts(lines, '2026-11-18', '2026-11-18');
+    const agg19 = aggregateReceipts(lines, '2026-11-19', '2026-11-19');
+    expect(agg18.totals.totalCents).toBe(2500);
+    expect(agg19.totals.totalCents).toBe(4000);
+  });
+
+  it('getSaoPauloDateRangeBounds gera intervalo [início SP inclusive, início do dia seguinte SP exclusivo) correto na virada da meia-noite', () => {
+    const start18 = getSaoPauloDayStartUtc('2026-11-18');
+    expect(start18.toISOString()).toBe('2026-11-18T03:00:00.000Z');
+
+    const bounds = getSaoPauloDateRangeBounds('2026-11-18', '2026-11-18');
+    expect(bounds.startUtc.toISOString()).toBe('2026-11-18T03:00:00.000Z');
+    expect(bounds.endExclusiveUtc.toISOString()).toBe('2026-11-19T03:00:00.000Z');
+
+    // 18/11 23:59:59.999 em SP entra no intervalo de 18/11
+    const lastMsOfDay18 = new Date('2026-11-19T02:59:59.999Z');
+    expect(lastMsOfDay18 >= bounds.startUtc && lastMsOfDay18 < bounds.endExclusiveUtc).toBe(true);
+
+    // 19/11 00:00:00.000 em SP fica fora de 18/11 e entra em 19/11
+    const firstMsOfDay19 = new Date('2026-11-19T03:00:00.000Z');
+    expect(firstMsOfDay19 >= bounds.startUtc && firstMsOfDay19 < bounds.endExclusiveUtc).toBe(false);
+
+    const bounds19 = getSaoPauloDateRangeBounds('2026-11-19', '2026-11-19');
+    expect(firstMsOfDay19 >= bounds19.startUtc && firstMsOfDay19 < bounds19.endExclusiveUtc).toBe(true);
+  });
+
   it('planHistoricalBackfill é idempotente, preserva pagamento conjunto sem dupla contagem e reporta inválidos sem inventar data', () => {
     const sharedNonce = 'joint-op-999';
 
@@ -712,8 +790,10 @@ describe('Livro `receipts` (Fase 2) — IDs, Paginação, Mapeamento e Backfill 
 
     expect(createdBar.amountCents).toBe(2000);
     expect(createdBar.jointPaymentId).toBe(sharedNonce);
+    expect(createdBar.dateKey).toBeUndefined();
     expect(createdLoc.amountCents).toBe(1500);
     expect(createdLoc.jointPaymentId).toBe(sharedNonce);
+    expect(createdLoc.dateKey).toBeUndefined();
     expect(createdBar.amountCents + createdLoc.amountCents).toBe(3500);
 
     // Re-execução com todos os IDs criados presentes -> zero criações novas

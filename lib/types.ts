@@ -296,7 +296,7 @@ export interface ReceiptDocument {
   method: PaymentMethod;
   amountCents: number; // inteiro > 0
   paidAt: unknown; // Firestore Timestamp / serverTimestamp() FieldValue
-  dateKey: string; // YYYY-MM-DD no fuso America/Sao_Paulo
+  dateKey?: string; // Legado/opcional: YYYY-MM-DD derivado de paidAt no fuso America/Sao_Paulo
   staffUid: string;
   staffName: string;
   jointPaymentId?: string;
