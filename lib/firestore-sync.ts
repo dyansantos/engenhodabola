@@ -12,6 +12,7 @@ import { Comanda, Product, GroupRental, Appointment, AgendaOperatingHours } from
 import { INITIAL_PRODUCTS } from './mock-data';
 import { validateComanda } from './storage';
 import { sanitizeForFirestore } from './firestore-transactions';
+import { nextClientRevFields } from './refunds';
 
 export interface FirestoreSyncMeta {
   fromCache: boolean;
@@ -107,7 +108,9 @@ export async function initializeBaseProductsIfEmpty(): Promise<{ initialized: bo
     return { initialized: true, count: INITIAL_PRODUCTS.length };
   } catch (error) {
     console.error('[Firestore product init error]:', error);
-    return { initialized: false, count: 0 };
+    throw error instanceof Error
+      ? error
+      : new Error('Não foi possível inicializar o catálogo base de produtos.');
   }
 }
 
@@ -131,6 +134,7 @@ export async function adminImportRecoveredComandas(
         const docRef = doc(db, 'comandas', cmd.id);
         const importedCmd: Comanda = {
           ...cmd,
+          ...nextClientRevFields(cmd),
           history: [
             ...cmd.history,
             {
@@ -172,6 +176,7 @@ export function validateGroupRental(data: any): data is GroupRental {
   if (typeof data.time !== 'string' || typeof data.space !== 'string') return false;
   if (typeof data.totalAmountCents !== 'number' || !Number.isInteger(data.totalAmountCents)) return false;
   if (!Array.isArray(data.participants) || !Array.isArray(data.payments)) return false;
+  if (data.refunds !== undefined && !Array.isArray(data.refunds)) return false;
   return true;
 }
 

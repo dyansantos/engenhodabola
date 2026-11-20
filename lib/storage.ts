@@ -184,6 +184,33 @@ export function validateComanda(comanda: unknown): comanda is Comanda {
     }
   }
 
+  // Validar estornos opcionais
+  if (c.refunds !== undefined) {
+    if (!Array.isArray(c.refunds)) return false;
+    for (const r of c.refunds as Record<string, unknown>[]) {
+      if (!r || typeof r !== 'object') return false;
+      if (typeof r.id !== 'string' || !r.id.trim()) return false;
+      if (typeof r.clientNonce !== 'string' || !r.clientNonce.trim()) return false;
+      if (typeof r.receiptId !== 'string' || !r.receiptId.trim()) return false;
+      if (typeof r.sourcePaymentId !== 'string' || !r.sourcePaymentId.trim()) return false;
+      if (r.method !== 'dinheiro' && r.method !== 'pix' && r.method !== 'debito' && r.method !== 'credito') {
+        return false;
+      }
+      if (typeof r.amountCents !== 'number' || !Number.isInteger(r.amountCents) || r.amountCents <= 0) {
+        return false;
+      }
+      if (typeof r.reason !== 'string' || !r.reason.trim()) return false;
+      if (typeof r.timestamp !== 'string' || isNaN(new Date(r.timestamp).getTime())) return false;
+    }
+  }
+
+  if (c.clientRev !== undefined && (typeof c.clientRev !== 'number' || !Number.isInteger(c.clientRev) || c.clientRev < 1)) {
+    return false;
+  }
+  if (c.revSeq !== undefined && (typeof c.revSeq !== 'number' || !Number.isInteger(c.revSeq) || c.revSeq < 1)) {
+    return false;
+  }
+
   // Validar histórico
   for (const h of c.history as Record<string, unknown>[]) {
     if (!h || typeof h !== 'object') return false;

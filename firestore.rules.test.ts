@@ -512,4 +512,502 @@ describe('Firestore Security Rules — Engenho da Bola (Fase 2)', () => {
       })
     );
   });
+
+  // =========================================================================
+  // ETAPA 4.1: ESTORNO DE PAGAMENTO E TRAVA PARA VERSÕES ANTIGAS
+  // =========================================================================
+
+  it('operador NÃO consegue registrar estorno em comanda nem criar receipt kind=estorno', async () => {
+    const opDb = operatorCtx().firestore();
+
+    await assertFails(
+      opDb.runTransaction(async tx => {
+        const cmdRef = opDb.doc('comandas/cmd-1');
+        const rcptRef = opDb.doc('receipts/rcpt_est_cmd_cmd-1_op-try');
+        const snap = await tx.get(cmdRef);
+        const cmd = snap.data()!;
+
+        tx.set(cmdRef, {
+          ...cmd,
+          clientRev: 2,
+          revSeq: 1,
+          refunds: [
+            {
+              id: 'ref_op-try',
+              clientNonce: 'op-try',
+              receiptId: 'rcpt_est_cmd_cmd-1_op-try',
+              sourcePaymentId: 'pay-old-1',
+              method: 'pix',
+              amountCents: 500,
+              reason: 'Tentativa de operador',
+              timestamp: new Date().toISOString(),
+              operator: 'Operador Teste',
+              operatorUid: 'op-uid-1',
+            },
+          ],
+          history: [
+            ...cmd.history,
+            {
+              id: 'hist-ref-op',
+              timestamp: new Date().toISOString(),
+              operator: 'Operador Teste',
+              type: 'estorno',
+              description: 'Tentativa de estorno',
+            },
+          ],
+        });
+
+        tx.set(rcptRef, {
+          id: 'rcpt_est_cmd_cmd-1_op-try',
+          origin: 'comanda',
+          refId: 'cmd-1',
+          refNumber: 105,
+          refLabel: 'Carlos',
+          method: 'pix',
+          amountCents: 500,
+          paidAt: firebase.firestore.FieldValue.serverTimestamp(),
+          staffUid: 'op-uid-1',
+          staffName: 'Operador Teste',
+          sourcePaymentId: 'pay-old-1',
+          refundId: 'ref_op-try',
+          reason: 'Tentativa de operador',
+          kind: 'estorno',
+        });
+      })
+    );
+  });
+
+  it('admin consegue estornar comanda encerrada (reabrindo-a) com receipt atômico, e bloqueia estorno sem motivo ou sem receipt', async () => {
+    const admDb = adminCtx().firestore();
+
+    // Prepara comanda encerrada
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await ctx.firestore().doc('comandas/cmd-1').update({
+        status: 'encerrada',
+        closedAt: '2026-11-18T14:00:00.000Z',
+      });
+    });
+
+    // Sem receipt correspondente -> falha
+    await assertFails(
+      admDb.runTransaction(async tx => {
+        const cmdRef = admDb.doc('comandas/cmd-1');
+        const snap = await tx.get(cmdRef);
+        const { closedAt: _c, ...cmd } = snap.data()!;
+        void _c;
+        tx.set(cmdRef, {
+          ...cmd,
+          status: 'aberta',
+          clientRev: 2,
+          revSeq: 1,
+          refunds: [
+            {
+              id: 'ref_no_rcpt',
+              clientNonce: 'no_rcpt',
+              receiptId: 'rcpt_est_cmd_cmd-1_no_rcpt',
+              sourcePaymentId: 'pay-old-1',
+              method: 'pix',
+              amountCents: 500,
+              reason: 'Sem recibo no livro',
+              timestamp: new Date().toISOString(),
+              operator: 'Admin Teste',
+              operatorUid: 'admin-uid-1',
+            },
+          ],
+          history: [
+            ...cmd.history,
+            {
+              id: 'hist-ref-1',
+              timestamp: new Date().toISOString(),
+              operator: 'Admin Teste',
+              type: 'estorno',
+              description: 'Estorno sem receipt',
+            },
+          ],
+        });
+      })
+    );
+
+    // Motivo curto (< 3 chars) -> falha
+    await assertFails(
+      admDb.runTransaction(async tx => {
+        const cmdRef = admDb.doc('comandas/cmd-1');
+        const rcptRef = opDbReceiptRef(admDb, 'rcpt_est_cmd_cmd-1_short');
+        const snap = await tx.get(cmdRef);
+        const { closedAt: _c, ...cmd } = snap.data()!;
+        void _c;
+        tx.set(cmdRef, {
+          ...cmd,
+          status: 'aberta',
+          clientRev: 2,
+          revSeq: 1,
+          refunds: [
+            {
+              id: 'ref_short',
+              clientNonce: 'short',
+              receiptId: 'rcpt_est_cmd_cmd-1_short',
+              sourcePaymentId: 'pay-old-1',
+              method: 'pix',
+              amountCents: 500,
+              reason: 'ok',
+              timestamp: new Date().toISOString(),
+              operator: 'Admin Teste',
+              operatorUid: 'admin-uid-1',
+            },
+          ],
+          history: [
+            ...cmd.history,
+            {
+              id: 'hist-ref-short',
+              timestamp: new Date().toISOString(),
+              operator: 'Admin Teste',
+              type: 'estorno',
+              description: 'Estorno motivo curto',
+            },
+          ],
+        });
+        tx.set(rcptRef, {
+          id: 'rcpt_est_cmd_cmd-1_short',
+          origin: 'comanda',
+          refId: 'cmd-1',
+          refNumber: 105,
+          refLabel: 'Carlos',
+          method: 'pix',
+          amountCents: 500,
+          paidAt: firebase.firestore.FieldValue.serverTimestamp(),
+          staffUid: 'admin-uid-1',
+          staffName: 'Admin Teste',
+          sourcePaymentId: 'pay-old-1',
+          refundId: 'ref_short',
+          reason: 'ok',
+          kind: 'estorno',
+        });
+      })
+    );
+
+    // Estorno válido pelo Admin reabrindo comanda encerrada -> sucesso
+    await assertSucceeds(
+      admDb.runTransaction(async tx => {
+        const cmdRef = admDb.doc('comandas/cmd-1');
+        const rcptRef = admDb.doc('receipts/rcpt_est_cmd_cmd-1_ref-1');
+        const snap = await tx.get(cmdRef);
+        const { closedAt: _c, ...cmd } = snap.data()!;
+        void _c;
+
+        tx.set(cmdRef, {
+          ...cmd,
+          status: 'aberta',
+          clientRev: 2,
+          revSeq: 1,
+          refunds: [
+            {
+              id: 'ref_ref-1',
+              clientNonce: 'ref-1',
+              receiptId: 'rcpt_est_cmd_cmd-1_ref-1',
+              sourcePaymentId: 'pay-old-1',
+              method: 'pix',
+              amountCents: 600,
+              reason: 'Cobrança duplicada no Pix',
+              timestamp: new Date().toISOString(),
+              operator: 'Admin Teste',
+              operatorUid: 'admin-uid-1',
+            },
+          ],
+          history: [
+            ...cmd.history,
+            {
+              id: 'hist-ref-valid',
+              timestamp: new Date().toISOString(),
+              operator: 'Admin Teste',
+              type: 'estorno',
+              description: 'Estorno de R$ 6,00',
+            },
+          ],
+        });
+
+        tx.set(rcptRef, {
+          id: 'rcpt_est_cmd_cmd-1_ref-1',
+          origin: 'comanda',
+          refId: 'cmd-1',
+          refNumber: 105,
+          refLabel: 'Carlos',
+          method: 'pix',
+          amountCents: 600,
+          paidAt: firebase.firestore.FieldValue.serverTimestamp(),
+          staffUid: 'admin-uid-1',
+          staffName: 'Admin Teste',
+          sourcePaymentId: 'pay-old-1',
+          refundId: 'ref_ref-1',
+          reason: 'Cobrança duplicada no Pix',
+          kind: 'estorno',
+        });
+      })
+    );
+  });
+
+  it('trava de versão antiga: escrita sem novo clientRev/revSeq em documento com refunds é recusada, e app novo paga e encerra normalmente', async () => {
+    const opDb = operatorCtx().firestore();
+
+    // Seed comanda já com 1 estorno e revSeq: 1
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await ctx.firestore().doc('comandas/cmd-1').update({
+        status: 'aberta',
+        clientRev: 2,
+        revSeq: 1,
+        refunds: [
+          {
+            id: 'ref_seed-1',
+            clientNonce: 'seed-1',
+            receiptId: 'rcpt_est_cmd_cmd-1_seed-1',
+            sourcePaymentId: 'pay-old-1',
+            method: 'pix',
+            amountCents: 600,
+            reason: 'Estorno inicial',
+            timestamp: '2026-11-18T13:00:00.000Z',
+            operator: 'Admin Teste',
+            operatorUid: 'admin-uid-1',
+          },
+        ],
+      });
+    });
+
+    // 1. Cliente antigo (faz spread mantendo revSeq: 1 sem incrementar) -> RECUSADO
+    await assertFails(
+      opDb.runTransaction(async tx => {
+        const cmdRef = opDb.doc('comandas/cmd-1');
+        const snap = await tx.get(cmdRef);
+        const cmd = snap.data()!;
+        tx.set(cmdRef, {
+          ...cmd,
+          status: 'encerrada',
+          closedAt: new Date().toISOString(),
+        });
+      })
+    );
+
+    // 2. App novo paga novamente com clientRev: 2 e revSeq: 2 + receipt -> PERMITIDO
+    await assertSucceeds(
+      opDb.runTransaction(async tx => {
+        const cmdRef = opDb.doc('comandas/cmd-1');
+        const rcptRef = opDb.doc('receipts/rcpt_cmd_cmd-1_pay-repaid');
+        const snap = await tx.get(cmdRef);
+        const cmd = snap.data()!;
+
+        tx.set(cmdRef, {
+          ...cmd,
+          clientRev: 2,
+          revSeq: (cmd.revSeq || 0) + 1,
+          payments: [
+            ...cmd.payments,
+            {
+              id: 'pay-repaid',
+              clientNonce: 'pay-repaid',
+              method: 'dinheiro',
+              amountCents: 2600,
+              timestamp: new Date().toISOString(),
+              operator: 'Operador Teste',
+              operatorUid: 'op-uid-1',
+            },
+          ],
+          history: [
+            ...cmd.history,
+            {
+              id: 'hist-repaid',
+              timestamp: new Date().toISOString(),
+              operator: 'Operador Teste',
+              type: 'pagamento',
+              description: 'Pagamento de R$ 26,00',
+            },
+          ],
+        });
+
+        tx.set(rcptRef, {
+          id: 'rcpt_cmd_cmd-1_pay-repaid',
+          origin: 'comanda',
+          refId: 'cmd-1',
+          refNumber: 105,
+          refLabel: 'Carlos',
+          method: 'dinheiro',
+          amountCents: 2600,
+          paidAt: firebase.firestore.FieldValue.serverTimestamp(),
+          staffUid: 'op-uid-1',
+          staffName: 'Operador Teste',
+          sourcePaymentId: 'pay-repaid',
+          kind: 'recebimento',
+        });
+      })
+    );
+
+    // 3. App novo encerra comanda com clientRev: 2 e revSeq: 3 -> PERMITIDO
+    await assertSucceeds(
+      opDb.runTransaction(async tx => {
+        const cmdRef = opDb.doc('comandas/cmd-1');
+        const snap = await tx.get(cmdRef);
+        const cmd = snap.data()!;
+
+        tx.set(cmdRef, {
+          ...cmd,
+          status: 'encerrada',
+          closedAt: new Date().toISOString(),
+          clientRev: 2,
+          revSeq: (cmd.revSeq || 0) + 1,
+          history: [
+            ...cmd.history,
+            {
+              id: 'hist-reclosed',
+              timestamp: new Date().toISOString(),
+              operator: 'Operador Teste',
+              type: 'encerramento',
+              description: 'Comanda encerrada novamente',
+            },
+          ],
+        });
+      })
+    );
+  });
+
+  it('locação em grupo: admin estorna locação quitada (reabrindo) e estorno em locação cancelada é bloqueado', async () => {
+    const admDb = adminCtx().firestore();
+
+    // Locação cancelada -> bloqueado
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await ctx.firestore().doc('group_rentals/gr-1').update({
+        status: 'cancelada',
+      });
+    });
+
+    await assertFails(
+      admDb.runTransaction(async tx => {
+        const ref = admDb.doc('group_rentals/gr-1');
+        const rcptRef = admDb.doc('receipts/rcpt_est_loc_gr-1_cancel');
+        const snap = await tx.get(ref);
+        const rental = snap.data()!;
+
+        tx.set(ref, {
+          ...rental,
+          status: 'aberta',
+          clientRev: 2,
+          revSeq: 1,
+          refunds: [
+            {
+              id: 'ref_cancel',
+              clientNonce: 'cancel',
+              receiptId: 'rcpt_est_loc_gr-1_cancel',
+              sourcePaymentId: 'grpay-old-1',
+              method: 'dinheiro',
+              amountCents: 1000,
+              reason: 'Tentativa em cancelada',
+              timestamp: new Date().toISOString(),
+              operator: 'Admin Teste',
+              operatorUid: 'admin-uid-1',
+              allocations: [{ participantId: 'p-1', participantName: 'João', amountCents: 1000 }],
+            },
+          ],
+          history: [
+            ...rental.history,
+            {
+              id: 'hist-gr-cancel',
+              timestamp: new Date().toISOString(),
+              operator: 'Admin Teste',
+              type: 'estorno',
+              description: 'Estorno em cancelada',
+            },
+          ],
+        });
+
+        tx.set(rcptRef, {
+          id: 'rcpt_est_loc_gr-1_cancel',
+          origin: 'locacao',
+          refId: 'gr-1',
+          refNumber: 501,
+          refLabel: 'Pelada Quarta (Areia 1)',
+          method: 'dinheiro',
+          amountCents: 1000,
+          paidAt: firebase.firestore.FieldValue.serverTimestamp(),
+          staffUid: 'admin-uid-1',
+          staffName: 'Admin Teste',
+          sourcePaymentId: 'grpay-old-1',
+          refundId: 'ref_cancel',
+          reason: 'Tentativa em cancelada',
+          kind: 'estorno',
+        });
+      })
+    );
+
+    // Locação quitada -> permitido (reabre para 'aberta' e remove closedAt)
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await ctx.firestore().doc('group_rentals/gr-1').update({
+        status: 'quitada',
+        closedAt: '2026-11-18T21:00:00.000Z',
+      });
+    });
+
+    await assertSucceeds(
+      admDb.runTransaction(async tx => {
+        const ref = admDb.doc('group_rentals/gr-1');
+        const rcptRef = admDb.doc('receipts/rcpt_est_loc_gr-1_ref-gr-1');
+        const snap = await tx.get(ref);
+        const { closedAt: _c, ...rental } = snap.data()!;
+        void _c;
+
+        tx.set(ref, {
+          ...rental,
+          status: 'aberta',
+          clientRev: 2,
+          revSeq: 1,
+          participants: rental.participants.map((p: { id: string; paidAmountCents: number }) =>
+            p.id === 'p-1'
+              ? { ...p, paidAmountCents: 2000, status: 'parcial' }
+              : p
+          ),
+          refunds: [
+            {
+              id: 'ref_ref-gr-1',
+              clientNonce: 'ref-gr-1',
+              receiptId: 'rcpt_est_loc_gr-1_ref-gr-1',
+              sourcePaymentId: 'grpay-old-1',
+              method: 'dinheiro',
+              amountCents: 1000,
+              reason: 'Desconto autorizado pelo admin',
+              timestamp: new Date().toISOString(),
+              operator: 'Admin Teste',
+              operatorUid: 'admin-uid-1',
+              allocations: [{ participantId: 'p-1', participantName: 'João', amountCents: 1000 }],
+            },
+          ],
+          history: [
+            ...rental.history,
+            {
+              id: 'hist-gr-ref-1',
+              timestamp: new Date().toISOString(),
+              operator: 'Admin Teste',
+              type: 'estorno',
+              description: 'Estorno parcial',
+            },
+          ],
+        });
+
+        tx.set(rcptRef, {
+          id: 'rcpt_est_loc_gr-1_ref-gr-1',
+          origin: 'locacao',
+          refId: 'gr-1',
+          refNumber: 501,
+          refLabel: 'Pelada Quarta (Areia 1)',
+          method: 'dinheiro',
+          amountCents: 1000,
+          paidAt: firebase.firestore.FieldValue.serverTimestamp(),
+          staffUid: 'admin-uid-1',
+          staffName: 'Admin Teste',
+          sourcePaymentId: 'grpay-old-1',
+          refundId: 'ref_ref-gr-1',
+          reason: 'Desconto autorizado pelo admin',
+          kind: 'estorno',
+        });
+      })
+    );
+  });
 });
+
+function opDbReceiptRef(db: firebase.firestore.Firestore, id: string) {
+  return db.doc(`receipts/${id}`);
+}

@@ -17,17 +17,29 @@ import {
   SlidersHorizontal,
 } from 'lucide-react';
 
-export function MobileNav() {
-  const { activeModule, setActiveModule, metrics, currentStaff } = useComandas();
-  const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
+export function MobileNav({ initialMoreOpen = false }: { initialMoreOpen?: boolean } = {}) {
+  const {
+    activeModule,
+    setActiveModule,
+    metrics,
+    currentStaff,
+    comandasLoaded,
+    comandasSyncError,
+  } = useComandas();
+  const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(initialMoreOpen);
   const isAdmin = currentStaff?.role === 'admin';
+  const showOpenBadge = comandasLoaded && !comandasSyncError && metrics.openCount > 0;
 
   const moreItems: { id: ActiveModule; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
     { id: 'alunos', label: 'Alunos e turmas', icon: GraduationCap },
     { id: 'mensalidades', label: 'Mensalidades', icon: CreditCard },
     { id: 'eventos', label: 'Eventos', icon: PartyPopper },
-    { id: 'caixa', label: 'Caixa', icon: Wallet },
-    ...(isAdmin ? [{ id: 'relatorios' as ActiveModule, label: 'Relatórios', icon: BarChart3 }] : []),
+    ...(isAdmin
+      ? [
+          { id: 'caixa' as ActiveModule, label: 'Caixa', icon: Wallet },
+          { id: 'relatorios' as ActiveModule, label: 'Relatórios', icon: BarChart3 },
+        ]
+      : []),
     { id: 'cadastros', label: 'Cadastros', icon: SlidersHorizontal },
   ];
 
@@ -108,7 +120,7 @@ export function MobileNav() {
         >
           <div className="relative">
             <Receipt className={`h-5 w-5 ${activeModule === 'comandas' ? 'text-emerald-900' : 'text-slate-500'}`} />
-            {metrics.openCount > 0 && (
+            {showOpenBadge && (
               <span className="absolute -top-1.5 -right-2.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-900 px-1 text-[10px] font-bold text-white">
                 {metrics.openCount}
               </span>

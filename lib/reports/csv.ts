@@ -23,11 +23,18 @@ function formatCentsCsvBR(cents: number): string {
   return (cents / 100).toFixed(2).replace('.', ',');
 }
 
+type CsvCell = string | { kind: 'number'; value: string };
+
+function csvNumberCents(cents: number): CsvCell {
+  return { kind: 'number', value: formatCentsCsvBR(cents) };
+}
+
 /**
  * Proteção contra injeção de fórmulas em planilhas (Excel/Calc/Sheets)
- * e escape de delimitador ";", aspas e quebras de linha.
+ * aplicada exclusivamente a campos de texto livre.
+ * Números gerados pelo sistema (como -60,00) NÃO passam por este escape.
  */
-function escapeCsvCell(raw: string | number): string {
+function escapeCsvTextCell(raw: string): string {
   let str = String(raw ?? '');
   if (/^\s*[=+\-@]/.test(str)) {
     str = `'${str}`;
@@ -38,8 +45,15 @@ function escapeCsvCell(raw: string | number): string {
   return str;
 }
 
-function toCsvRow(cells: (string | number)[]): string {
-  return cells.map(escapeCsvCell).join(';');
+function formatCsvCell(cell: CsvCell): string {
+  if (typeof cell !== 'string') {
+    return cell.value;
+  }
+  return escapeCsvTextCell(cell);
+}
+
+function toCsvRow(cells: CsvCell[]): string {
+  return cells.map(formatCsvCell).join(';');
 }
 
 export interface BuildReceiptsCsvParams {
@@ -51,8 +65,8 @@ export interface BuildReceiptsCsvParams {
 
 /**
  * Gera conteúdo CSV no padrão de planilhas brasileiras (BOM UTF-8, separador ";",
- * decimal com vírgula, datas dd/mm/aaaa e proteção contra injeção de fórmulas).
- * Inclui o resumo consolidado idêntico à tabela exibida e o detalhamento de lançamentos.
+ * decimal com vírgula, datas dd/mm/aaaa e proteção contra injeção de fórmulas em textos livres).
+ * Inclui o resumo consolidado idêntico à tabela exibida e o detalhamento de lançamentos (incluindo estornos).
  */
 export function buildReceiptsCsv({
   rangeLabel,
@@ -79,7 +93,7 @@ export function buildReceiptsCsv({
   rows.push(
     toCsvRow([
       'Escopo',
-      'Este painel inclui comandas e locações. Mensalidades, eventos cobrados separadamente e despesas ainda não estão integrados.',
+      'Este painel inclui comandas e locações (recebimentos e estornos). Mensalidades, eventos cobrados separadamente e despesas ainda não estão integrados.',
     ])
   );
   rows.push('');
@@ -87,13 +101,17 @@ export function buildReceiptsCsv({
   // Seção 1: Indicadores resumidos do período
   rows.push(toCsvRow(['RESUMO DO PERÍODO']));
   rows.push(toCsvRow(['Indicador', 'Valor (R$)']));
-  rows.push(toCsvRow(['Recebido no período', formatCentsCsvBR(totals.totalCents)]));
-  rows.push(toCsvRow(['Bar e cozinha (Comandas)', formatCentsCsvBR(totals.comandasCents)]));
-  rows.push(toCsvRow(['Locações de quadras', formatCentsCsvBR(totals.locacoesCents)]));
-  rows.push(toCsvRow(['Pix', formatCentsCsvBR(totals.byMethodCents.pix)]));
-  rows.push(toCsvRow(['Dinheiro', formatCentsCsvBR(totals.byMethodCents.dinheiro)]));
-  rows.push(toCsvRow(['Débito', formatCentsCsvBR(totals.byMethodCents.debito)]));
-  rows.push(toCsvRow(['Crédito', formatCentsCsvBR(totals.byMethodCents.credito)]));
+  rows.push(toCsvRow(['Recebido no período', csvNumberCents(totals.totalCents)]));
+  if (totals.refundedCents > 0) {
+    rows.push(toCsvRow(['Recebido bruto no período', csvNumberCents(totals.grossReceivedCents)]));
+    rows.push(toCsvRow(['Estornos no período', csvNumberCents(-totals.refundedCents)]));
+  }
+  rows.push(toCsvRow(['Bar e cozinha (Comandas)', csvNumberCents(totals.comandasCents)]));
+  rows.push(toCsvRow(['Locações de quadras', csvNumberCents(totals.locacoesCents)]));
+  rows.push(toCsvRow(['Pix', csvNumberCents(totals.byMethodCents.pix)]));
+  rows.push(toCsvRow(['Dinheiro', csvNumberCents(totals.byMethodCents.dinheiro)]));
+  rows.push(toCsvRow(['Débito', csvNumberCents(totals.byMethodCents.debito)]));
+  rows.push(toCsvRow(['Crédito', csvNumberCents(totals.byMethodCents.credito)]));
   rows.push('');
 
   // Seção 2: Tabela consolidada (espelho exato da tabela exibida)
@@ -115,13 +133,13 @@ export function buildReceiptsCsv({
     rows.push(
       toCsvRow([
         bucket.label,
-        formatCentsCsvBR(bucket.comandasCents),
-        formatCentsCsvBR(bucket.locacoesCents),
-        formatCentsCsvBR(bucket.totalCents),
-        formatCentsCsvBR(bucket.byMethodCents.pix),
-        formatCentsCsvBR(bucket.byMethodCents.dinheiro),
-        formatCentsCsvBR(bucket.byMethodCents.debito),
-        formatCentsCsvBR(bucket.byMethodCents.credito),
+        csvNumberCents(bucket.comandasCents),
+        csvNumberCents(bucket.locacoesCents),
+        csvNumberCents(bucket.totalCents),
+        csvNumberCents(bucket.byMethodCents.pix),
+        csvNumberCents(bucket.byMethodCents.dinheiro),
+        csvNumberCents(bucket.byMethodCents.debito),
+        csvNumberCents(bucket.byMethodCents.credito),
       ])
     );
   }
@@ -129,13 +147,13 @@ export function buildReceiptsCsv({
   rows.push(
     toCsvRow([
       'Total do período',
-      formatCentsCsvBR(totals.comandasCents),
-      formatCentsCsvBR(totals.locacoesCents),
-      formatCentsCsvBR(totals.totalCents),
-      formatCentsCsvBR(totals.byMethodCents.pix),
-      formatCentsCsvBR(totals.byMethodCents.dinheiro),
-      formatCentsCsvBR(totals.byMethodCents.debito),
-      formatCentsCsvBR(totals.byMethodCents.credito),
+      csvNumberCents(totals.comandasCents),
+      csvNumberCents(totals.locacoesCents),
+      csvNumberCents(totals.totalCents),
+      csvNumberCents(totals.byMethodCents.pix),
+      csvNumberCents(totals.byMethodCents.dinheiro),
+      csvNumberCents(totals.byMethodCents.debito),
+      csvNumberCents(totals.byMethodCents.credito),
     ])
   );
   rows.push('');
@@ -146,6 +164,7 @@ export function buildReceiptsCsv({
     toCsvRow([
       'Data',
       'Hora',
+      'Tipo',
       'Origem',
       'Número',
       'Identificação',
@@ -153,23 +172,29 @@ export function buildReceiptsCsv({
       'Valor recebido (R$)',
       'Funcionário',
       'Recebimento conjunto',
+      'Motivo do estorno',
     ])
   );
 
   for (const line of filteredLines) {
+    const isRefund = line.kind === 'estorno';
     const isJoint =
       !!line.jointPaymentKey && (jointPaymentCounts[line.jointPaymentKey] || 0) >= 2;
+    const signedCents = isRefund ? -line.amountCents : line.amountCents;
+
     rows.push(
       toCsvRow([
         formatDate(line.paidAtIso),
         formatTime(line.paidAtIso),
+        isRefund ? 'Estorno' : 'Recebimento',
         line.origin === 'comanda' ? 'Comanda' : 'Locação',
         `#${line.refNumber}`,
         line.refLabel,
         METHOD_LABELS_PT[line.method],
-        formatCentsCsvBR(line.amountCents),
+        csvNumberCents(signedCents),
         line.operatorName,
         isJoint ? 'Sim' : 'Não',
+        isRefund ? line.reason || '' : '',
       ])
     );
   }

@@ -8,7 +8,6 @@ import {
   restoreDefaultsConfirmed,
   saveComandasToStorage,
 } from './storage';
-import { INITIAL_COMANDAS } from './mock-data';
 import { Comanda } from './types';
 
 class MemoryStorage {
@@ -26,6 +25,49 @@ class MemoryStorage {
     this.map.clear();
   }
 }
+
+/**
+ * Fixture representando as comandas legadas de demonstração (cmd-101 a cmd-106)
+ * que podiam ter ficado gravadas no localStorage de versões antigas.
+ */
+const LEGACY_DEMO_COMANDAS: Comanda[] = (
+  [
+    ['cmd-101', 'Turma do Beach Tennis'],
+    ['cmd-102', 'Lucas Silveira'],
+    ['cmd-103', 'Pelada Society — Quarta Show'],
+    ['cmd-104', 'Mariana Costa'],
+    ['cmd-105', 'Carlos Henrique (Ontem)'],
+    ['cmd-106', 'Diogo Alcantara (Aberta Ontem)'],
+  ] as const
+).map(([id, name], idx) => ({
+  id,
+  number: 101 + idx,
+  type: idx % 2 === 0 ? 'individual' : 'mesa',
+  name,
+  status: 'aberta',
+  openedAt: '2026-11-18T12:00:00.000Z',
+  items: [
+    {
+      id: `item-demo-${idx + 1}`,
+      productId: 'prod-1',
+      name: 'Cerveja Heineken 600ml',
+      category: 'Bebidas',
+      priceCents: 1800,
+      quantity: 1,
+      addedAt: '2026-11-18T12:05:00.000Z',
+    },
+  ],
+  payments: [],
+  history: [
+    {
+      id: `hist-demo-${idx + 1}`,
+      timestamp: '2026-11-18T12:00:00.000Z',
+      operator: 'Operador de demonstração',
+      type: 'abertura',
+      description: 'Comanda demonstrativa legada.',
+    },
+  ],
+}));
 
 function makeRealComanda(overrides: Partial<Comanda> = {}): Comanda {
   return {
@@ -61,7 +103,7 @@ function makeRealComanda(overrides: Partial<Comanda> = {}): Comanda {
   };
 }
 
-describe('Armazenamento local (Etapa 3.0) — Sem semeadura fictícia nem importação de exemplos', () => {
+describe('Armazenamento local (Etapas 3.0 e 3.1) — Sem semeadura fictícia nem importação de exemplos', () => {
   const prevWindow = (globalThis as Record<string, unknown>).window;
   const prevLocalStorage = (globalThis as Record<string, unknown>).localStorage;
   let memoryStorage: MemoryStorage;
@@ -85,7 +127,7 @@ describe('Armazenamento local (Etapa 3.0) — Sem semeadura fictícia nem import
     }
   });
 
-  it('primeira execução limpa retorna lista vazia e NÃO semeia INITIAL_COMANDAS no localStorage', () => {
+  it('primeira execução limpa retorna lista vazia e NÃO semeia comandas fictícias no localStorage', () => {
     const res = loadComandasFromStorage();
     expect(res.status).toBe('ok');
     if (res.status === 'ok') {
@@ -95,14 +137,14 @@ describe('Armazenamento local (Etapa 3.0) — Sem semeadura fictícia nem import
     expect(loadRealLocalBackupComandas()).toEqual([]);
   });
 
-  it('identifica todas as comandas antigas de INITIAL_COMANDAS como exemplo e bloqueia sua importação', () => {
-    expect(INITIAL_COMANDAS.length).toBeGreaterThan(0);
-    for (const demo of INITIAL_COMANDAS) {
+  it('identifica comandas legadas de demonstração (cmd-101..cmd-106) e bloqueia sua importação', () => {
+    expect(LEGACY_DEMO_COMANDAS.length).toBe(6);
+    for (const demo of LEGACY_DEMO_COMANDAS) {
       expect(isDemoComanda(demo)).toBe(true);
     }
 
-    // Simula navegador que já tinha INITIAL_COMANDAS gravadas em versão anterior
-    saveComandasToStorage(INITIAL_COMANDAS);
+    // Simula navegador que já tinha comandas legadas gravadas em versão anterior
+    saveComandasToStorage(LEGACY_DEMO_COMANDAS);
     expect(loadRealLocalBackupComandas()).toEqual([]);
   });
 
@@ -126,7 +168,7 @@ describe('Armazenamento local (Etapa 3.0) — Sem semeadura fictícia nem import
     expect(isDemoComanda(realComanda)).toBe(false);
     expect(isDemoComanda(legacyLocalRealComanda)).toBe(false);
 
-    const mixed = [...INITIAL_COMANDAS, realComanda, legacyLocalRealComanda];
+    const mixed = [...LEGACY_DEMO_COMANDAS, realComanda, legacyLocalRealComanda];
     expect(filterRealBackupComandas(mixed).map(c => c.id)).toEqual([
       realComanda.id,
       legacyLocalRealComanda.id,

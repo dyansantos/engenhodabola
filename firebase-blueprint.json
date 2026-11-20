@@ -42,7 +42,10 @@
         "responsible": { "type": "string", "maxLength": 128 },
         "status": { "type": "string", "enum": ["aberta", "encerrada"] },
         "openedAt": { "type": "string" },
-        "closedAt": { "type": "string" }
+        "closedAt": { "type": "string" },
+        "refunds": { "type": "array" },
+        "clientRev": { "type": "integer" },
+        "revSeq": { "type": "integer" }
       },
       "required": ["id", "number", "type", "name", "status", "openedAt"]
     },
@@ -62,7 +65,10 @@
         "createdAt": { "type": "string" },
         "closedAt": { "type": "string" },
         "createdByUid": { "type": "string", "maxLength": 128 },
-        "createdByName": { "type": "string", "maxLength": 128 }
+        "createdByName": { "type": "string", "maxLength": 128 },
+        "refunds": { "type": "array" },
+        "clientRev": { "type": "integer" },
+        "revSeq": { "type": "integer" }
       },
       "required": ["id", "number", "groupName", "date", "time", "space", "totalAmountCents", "status", "createdAt"]
     },
@@ -84,6 +90,8 @@
         "staffName": { "type": "string", "maxLength": 128 },
         "jointPaymentId": { "type": "string", "maxLength": 128 },
         "sourcePaymentId": { "type": "string", "maxLength": 128 },
+        "refundId": { "type": "string", "maxLength": 128 },
+        "reason": { "type": "string", "maxLength": 300 },
         "kind": { "type": "string", "enum": ["recebimento", "estorno"] }
       },
       "required": [

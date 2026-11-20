@@ -22,6 +22,8 @@ export interface ReceiptLine {
   operatorUid: string;
   jointPaymentKey?: string;
   sourcePaymentId?: string;
+  refundId?: string;
+  reason?: string;
   kind?: ReceiptKind;
 }
 
@@ -39,6 +41,28 @@ export interface BuildReceiptLinesResult {
   issues: ReceiptIssue[];
 }
 
+function buildDeterministicIdWithPrefix(
+  prefix: string,
+  hashSeed: string,
+  refId: string,
+  key: string
+): string {
+  const safeRef = refId.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  const safeKey = key.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  const raw = `${prefix}_${safeRef}_${safeKey}`;
+  if (raw.length <= 120) {
+    return raw;
+  }
+
+  let hash = 2166136261;
+  for (let i = 0; i < hashSeed.length; i++) {
+    hash ^= hashSeed.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  const hexHash = (hash >>> 0).toString(16).padStart(8, '0');
+  return `${prefix}_${safeRef.slice(0, 44)}_${safeKey.slice(0, 44)}_${hexHash}`.slice(0, 128);
+}
+
 /**
  * Gera um identificador determinístico para documentos na coleção append-only `receipts`.
  * Garante idempotência entre transações ao vivo e backfill histórico sem duplicar lançamentos.
@@ -49,21 +73,25 @@ export function buildDeterministicReceiptId(
   paymentKey: string
 ): string {
   const prefix = origin === 'comanda' ? 'rcpt_cmd' : 'rcpt_loc';
-  const safeRef = refId.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
-  const safeKey = paymentKey.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
-  const raw = `${prefix}_${safeRef}_${safeKey}`;
-  if (raw.length <= 120) {
-    return raw;
-  }
+  return buildDeterministicIdWithPrefix(prefix, `${origin}:${refId}:${paymentKey}`, refId, paymentKey);
+}
 
-  let hash = 2166136261;
-  const full = `${origin}:${refId}:${paymentKey}`;
-  for (let i = 0; i < full.length; i++) {
-    hash ^= full.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  const hexHash = (hash >>> 0).toString(16).padStart(8, '0');
-  return `${prefix}_${safeRef.slice(0, 46)}_${safeKey.slice(0, 46)}_${hexHash}`.slice(0, 128);
+/**
+ * Gera um identificador determinístico para documentos de estorno na coleção `receipts`.
+ * Garante idempotência por clientNonce sem nunca colidir com recebimentos originais.
+ */
+export function buildDeterministicRefundReceiptId(
+  origin: ReceiptOrigin,
+  refId: string,
+  refundKey: string
+): string {
+  const prefix = origin === 'comanda' ? 'rcpt_est_cmd' : 'rcpt_est_loc';
+  return buildDeterministicIdWithPrefix(
+    prefix,
+    `estorno:${origin}:${refId}:${refundKey}`,
+    refId,
+    refundKey
+  );
 }
 
 const VALID_METHODS = new Set<PaymentMethod>(['dinheiro', 'pix', 'debito', 'credito']);
@@ -206,6 +234,83 @@ export function buildReceiptLines(
         operatorName: typeof p.operator === 'string' && p.operator.trim() ? p.operator.trim() : 'Não informado',
         operatorUid: typeof p.operatorUid === 'string' ? p.operatorUid : '',
         ...(jointPaymentKey ? { jointPaymentKey } : {}),
+        sourcePaymentId: paymentId,
+        kind: 'recebimento',
+      });
+    });
+
+    const refunds = Array.isArray(cmd.refunds) ? cmd.refunds : [];
+    refunds.forEach((r, idx) => {
+      const refundId = typeof r?.id === 'string' && r.id.trim() ? r.id.trim() : `${cmd.id}-ref-${idx}`;
+      if (!r || typeof r !== 'object') {
+        issues.push({
+          id: refundId,
+          origin: 'comanda',
+          refId: cmd.id,
+          refNumber: cmd.number,
+          refLabel: cmdLabel,
+          reason: 'Registro de estorno malformado.',
+        });
+        return;
+      }
+
+      const tsResult = parseValidTimestamp(r.timestamp);
+      if (!tsResult.ok) {
+        issues.push({
+          id: refundId,
+          origin: 'comanda',
+          refId: cmd.id,
+          refNumber: cmd.number,
+          refLabel: cmdLabel,
+          reason: tsResult.reason,
+        });
+        return;
+      }
+
+      const amountResult = validateAmountCents(r.amountCents);
+      if (!amountResult.ok) {
+        issues.push({
+          id: refundId,
+          origin: 'comanda',
+          refId: cmd.id,
+          refNumber: cmd.number,
+          refLabel: cmdLabel,
+          reason: amountResult.reason,
+        });
+        return;
+      }
+
+      if (!validatePaymentMethod(r.method)) {
+        issues.push({
+          id: refundId,
+          origin: 'comanda',
+          refId: cmd.id,
+          refNumber: cmd.number,
+          refLabel: cmdLabel,
+          reason: `Forma de pagamento desconhecida no estorno: "${String((r as { method?: unknown }).method)}".`,
+        });
+        return;
+      }
+
+      lines.push({
+        id: `comanda:${cmd.id}:estorno:${refundId}`,
+        paidAtIso: tsResult.iso,
+        dateKey: formatValidDateKeySaoPaulo(tsResult.date),
+        origin: 'comanda',
+        refId: cmd.id,
+        refNumber: cmd.number,
+        refLabel: cmdLabel,
+        method: r.method,
+        amountCents: amountResult.value,
+        operatorName: typeof r.operator === 'string' && r.operator.trim() ? r.operator.trim() : 'Não informado',
+        operatorUid: typeof r.operatorUid === 'string' ? r.operatorUid : '',
+        ...(typeof r.jointPaymentId === 'string' && r.jointPaymentId.trim()
+          ? { jointPaymentKey: r.jointPaymentId.trim() }
+          : {}),
+        sourcePaymentId: r.sourcePaymentId,
+        refundId,
+        reason: typeof r.reason === 'string' ? r.reason.trim() : undefined,
+        kind: 'estorno',
       });
     });
   }
@@ -283,6 +388,83 @@ export function buildReceiptLines(
         operatorName: typeof p.operator === 'string' && p.operator.trim() ? p.operator.trim() : 'Não informado',
         operatorUid: typeof p.operatorUid === 'string' ? p.operatorUid : '',
         ...(jointPaymentKey ? { jointPaymentKey } : {}),
+        sourcePaymentId: paymentId,
+        kind: 'recebimento',
+      });
+    });
+
+    const refunds = Array.isArray(rental.refunds) ? rental.refunds : [];
+    refunds.forEach((r, idx) => {
+      const refundId = typeof r?.id === 'string' && r.id.trim() ? r.id.trim() : `${rental.id}-ref-${idx}`;
+      if (!r || typeof r !== 'object') {
+        issues.push({
+          id: refundId,
+          origin: 'locacao',
+          refId: rental.id,
+          refNumber: rental.number,
+          refLabel: rentalLabel,
+          reason: 'Registro de estorno malformado.',
+        });
+        return;
+      }
+
+      const tsResult = parseValidTimestamp(r.timestamp);
+      if (!tsResult.ok) {
+        issues.push({
+          id: refundId,
+          origin: 'locacao',
+          refId: rental.id,
+          refNumber: rental.number,
+          refLabel: rentalLabel,
+          reason: tsResult.reason,
+        });
+        return;
+      }
+
+      const amountResult = validateAmountCents(r.amountCents);
+      if (!amountResult.ok) {
+        issues.push({
+          id: refundId,
+          origin: 'locacao',
+          refId: rental.id,
+          refNumber: rental.number,
+          refLabel: rentalLabel,
+          reason: amountResult.reason,
+        });
+        return;
+      }
+
+      if (!validatePaymentMethod(r.method)) {
+        issues.push({
+          id: refundId,
+          origin: 'locacao',
+          refId: rental.id,
+          refNumber: rental.number,
+          refLabel: rentalLabel,
+          reason: `Forma de pagamento desconhecida no estorno: "${String((r as { method?: unknown }).method)}".`,
+        });
+        return;
+      }
+
+      lines.push({
+        id: `locacao:${rental.id}:estorno:${refundId}`,
+        paidAtIso: tsResult.iso,
+        dateKey: formatValidDateKeySaoPaulo(tsResult.date),
+        origin: 'locacao',
+        refId: rental.id,
+        refNumber: rental.number,
+        refLabel: rentalLabel,
+        method: r.method,
+        amountCents: amountResult.value,
+        operatorName: typeof r.operator === 'string' && r.operator.trim() ? r.operator.trim() : 'Não informado',
+        operatorUid: typeof r.operatorUid === 'string' ? r.operatorUid : '',
+        ...(typeof r.jointPaymentId === 'string' && r.jointPaymentId.trim()
+          ? { jointPaymentKey: r.jointPaymentId.trim() }
+          : {}),
+        sourcePaymentId: r.sourcePaymentId,
+        refundId,
+        reason: typeof r.reason === 'string' ? r.reason.trim() : undefined,
+        kind: 'estorno',
       });
     });
   }

@@ -53,12 +53,27 @@ export interface PaymentRecord {
   clientNonce?: string; // Chave de idempotência para evitar cobrança duplicada
 }
 
+export interface ComandaRefund {
+  id: string;
+  clientNonce: string;
+  receiptId: string;
+  sourcePaymentId: string;
+  method: PaymentMethod;
+  amountCents: number; // Valor estornado em centavos inteiros (> 0)
+  reason: string;
+  timestamp: string;
+  operator: string;
+  operatorUid: string;
+  jointPaymentId?: string;
+}
+
 export type HistoryActionType =
   | 'abertura'
   | 'item_adicionado'
   | 'item_removido'
   | 'item_transferido'
   | 'pagamento'
+  | 'estorno'
   | 'encerramento';
 
 export interface ComandaHistoryEntry {
@@ -83,9 +98,12 @@ export interface Comanda {
   closedAt?: string;
   items: ComandaItem[];
   payments: PaymentRecord[];
+  refunds?: ComandaRefund[];
   history: ComandaHistoryEntry[];
   lastModifiedByUid?: string;
   lastModifiedAt?: string;
+  clientRev?: number;
+  revSeq?: number;
 }
 
 export type ActiveModule =
@@ -252,12 +270,27 @@ export interface GroupRentalPayment {
   };
 }
 
+export interface GroupRentalRefund {
+  id: string;
+  clientNonce: string;
+  receiptId: string;
+  sourcePaymentId: string;
+  method: PaymentMethod;
+  amountCents: number; // Soma das alocações estornadas em centavos inteiros (> 0)
+  reason: string;
+  timestamp: string;
+  operator: string;
+  operatorUid: string;
+  allocations: GroupPaymentAllocation[];
+  jointPaymentId?: string;
+}
+
 export interface GroupRentalHistoryEntry {
   id: string;
   timestamp: string;
   operator: string;
   operatorUid?: string;
-  type: 'criacao' | 'ajuste_divisao' | 'pagamento' | 'encerramento' | 'vinculo_bar';
+  type: 'criacao' | 'ajuste_divisao' | 'pagamento' | 'estorno' | 'encerramento' | 'vinculo_bar';
   description: string;
   details?: string;
 }
@@ -275,6 +308,7 @@ export interface GroupRental {
   status: GroupRentalStatus;
   participants: GroupParticipant[];
   payments: GroupRentalPayment[];
+  refunds?: GroupRentalRefund[];
   history: GroupRentalHistoryEntry[];
   createdAt: string;
   closedAt?: string;
@@ -282,6 +316,8 @@ export interface GroupRental {
   createdByName: string;
   lastModifiedAt?: string;
   lastModifiedByUid?: string;
+  clientRev?: number;
+  revSeq?: number;
 }
 
 export type ReceiptOrigin = 'comanda' | 'locacao';
@@ -301,6 +337,8 @@ export interface ReceiptDocument {
   staffName: string;
   jointPaymentId?: string;
   sourcePaymentId: string;
+  refundId?: string;
+  reason?: string;
   kind: ReceiptKind;
 }
 

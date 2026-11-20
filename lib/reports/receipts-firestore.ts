@@ -346,6 +346,10 @@ export function mapReceiptDocsToLines(rawDocs: RawReceiptDoc[]): {
       typeof d.sourcePaymentId === 'string' && d.sourcePaymentId.trim()
         ? d.sourcePaymentId.trim()
         : undefined;
+    const refundId =
+      typeof d.refundId === 'string' && d.refundId.trim() ? d.refundId.trim() : undefined;
+    const reason =
+      typeof d.reason === 'string' && d.reason.trim() ? d.reason.trim() : undefined;
 
     lines.push({
       id: docId,
@@ -361,6 +365,8 @@ export function mapReceiptDocsToLines(rawDocs: RawReceiptDoc[]): {
       operatorUid: staffUid,
       ...(jointPaymentKey ? { jointPaymentKey } : {}),
       ...(sourcePaymentId ? { sourcePaymentId } : {}),
+      ...(refundId ? { refundId } : {}),
+      ...(reason ? { reason } : {}),
       kind,
     });
   }
@@ -510,6 +516,9 @@ export function planHistoricalBackfill(params: {
   const plannedIds = new Set<string>();
 
   for (const line of lines) {
+    if (line.kind === 'estorno') {
+      continue;
+    }
     if (!line.refId || !Number.isInteger(line.refNumber) || line.refNumber <= 0) {
       invalidIssues.push({
         id: line.id,

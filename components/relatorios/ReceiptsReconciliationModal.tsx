@@ -87,6 +87,8 @@ export function ReceiptsReconciliationModal({
           line.operatorName,
           METHOD_LABELS[line.method],
           line.origin === 'comanda' ? 'comanda bar cozinha' : 'locacao quadra',
+          line.kind === 'estorno' ? 'estorno' : 'recebimento',
+          line.reason || '',
           line.jointPaymentKey || '',
         ]
           .join(' ')
@@ -284,6 +286,16 @@ export function ReceiptsReconciliationModal({
                         <span>·</span>
                         <span>Funcionário: {line.operatorName}</span>
                       </p>
+
+                      {line.kind === 'estorno' && (
+                        <p className="text-[11px] text-rose-800">
+                          {line.reason && <span>Motivo do estorno: {line.reason}</span>}
+                          {line.reason && line.sourcePaymentId && <span> · </span>}
+                          {line.sourcePaymentId && (
+                            <span className="text-rose-700">Ref. pag.: {line.sourcePaymentId}</span>
+                          )}
+                        </p>
+                      )}
                     </div>
 
                     <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0">

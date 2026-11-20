@@ -141,6 +141,74 @@ service cloud.firestore {
       );
     }
 
+    function hasRefunds(doc) {
+      return 'refunds' in doc && doc.refunds is list && doc.refunds.size() > 0;
+    }
+
+    function refundsCount(doc) {
+      return ('refunds' in doc && doc.refunds is list) ? doc.refunds.size() : 0;
+    }
+
+    // Trava para versões antigas do app: exige clientRev >= 2 e incremento sequencial de revSeq.
+    // Impede que celulares desatualizados (que copiam o documento com spread) gravem em documentos com estorno.
+    function hasFreshClientRev(inc, ext) {
+      return 'clientRev' in inc && inc.clientRev is int && inc.clientRev >= 2
+        && 'revSeq' in inc && inc.revSeq is int
+        && (
+          (!('revSeq' in ext) && inc.revSeq == 1) ||
+          ('revSeq' in ext && ext.revSeq is int && inc.revSeq == ext.revSeq + 1)
+        );
+    }
+
+    function refundsUnchanged(inc, ext) {
+      return (!('refunds' in ext) && (!('refunds' in inc) || (inc.refunds is list && inc.refunds.size() == 0)))
+        || ('refunds' in ext && 'refunds' in inc && inc.refunds == ext.refunds);
+    }
+
+    function refundsAppendedByOne(inc, ext) {
+      return 'refunds' in inc && inc.refunds is list && inc.refunds.size() <= 1000 && (
+        (!('refunds' in ext) && inc.refunds.size() == 1) ||
+        ('refunds' in ext && ext.refunds is list && inc.refunds.size() == ext.refunds.size() + 1 && isListAppendOnly(inc.refunds, ext.refunds))
+      );
+    }
+
+    function validRefundEntryBase(r) {
+      return r is map
+        && r.keys().hasAll([
+          'id', 'clientNonce', 'receiptId', 'sourcePaymentId',
+          'method', 'amountCents', 'reason', 'timestamp', 'operator', 'operatorUid'
+        ])
+        && r.id is string && r.id.size() > 0 && r.id.size() <= 128
+        && r.clientNonce is string && r.clientNonce.size() > 0 && r.clientNonce.size() <= 128
+        && isValidId(r.receiptId)
+        && r.sourcePaymentId is string && r.sourcePaymentId.size() > 0 && r.sourcePaymentId.size() <= 128
+        && r.method in ['dinheiro', 'pix', 'debito', 'credito']
+        && r.amountCents is int && r.amountCents > 0
+        && r.reason is string && r.reason.size() >= 3 && r.reason.size() <= 300
+        && r.timestamp is string && r.timestamp.size() > 0 && r.timestamp.size() <= 64
+        && r.operator is string && r.operator.size() > 0 && r.operator.size() <= 128
+        && r.operatorUid == request.auth.uid
+        && (!('jointPaymentId' in r) || (r.jointPaymentId is string && r.jointPaymentId.size() > 0 && r.jointPaymentId.size() <= 128));
+    }
+
+    function validComandaRefundEntry(r) {
+      return validRefundEntryBase(r)
+        && r.keys().hasOnly([
+          'id', 'clientNonce', 'receiptId', 'sourcePaymentId',
+          'method', 'amountCents', 'reason', 'timestamp', 'operator', 'operatorUid', 'jointPaymentId'
+        ]);
+    }
+
+    function validGroupRentalRefundEntry(r) {
+      return validRefundEntryBase(r)
+        && r.keys().hasAll(['allocations'])
+        && r.keys().hasOnly([
+          'id', 'clientNonce', 'receiptId', 'sourcePaymentId',
+          'method', 'amountCents', 'reason', 'timestamp', 'operator', 'operatorUid', 'jointPaymentId', 'allocations'
+        ])
+        && r.allocations is list && r.allocations.size() > 0 && r.allocations.size() <= 200;
+    }
+
     function validComandaUpdate(inc, ext) {
       return inc.id == ext.id
         && inc.number == ext.number
@@ -148,6 +216,8 @@ service cloud.firestore {
         && inc.status in ['aberta', 'encerrada']
         && isListAppendOnly(inc.payments, ext.payments)
         && isListAppendOnly(inc.history, ext.history)
+        && refundsUnchanged(inc, ext)
+        && (!hasRefunds(ext) || hasFreshClientRev(inc, ext))
         && (
           inc.payments == ext.payments || (
             inc.items == ext.items &&
@@ -159,6 +229,22 @@ service cloud.firestore {
         && comandaItemsPricesImmutable(inc.items, ext.items);
     }
 
+    function validComandaRefundUpdate(inc, ext) {
+      return isAdmin()
+        && inc.id == ext.id
+        && inc.number == ext.number
+        && ext.status in ['aberta', 'encerrada']
+        && inc.status == 'aberta'
+        && !('closedAt' in inc)
+        && inc.items == ext.items
+        && inc.payments == ext.payments
+        && isListAppendOnly(inc.history, ext.history)
+        && refundsAppendedByOne(inc, ext)
+        && validComandaRefundEntry(inc.refunds[refundsCount(ext)])
+        && hasFreshClientRev(inc, ext)
+        && existsAfter(/databases/$(database)/documents/receipts/$(inc.refunds[refundsCount(ext)].receiptId));
+    }
+
     function validGroupRentalUpdate(inc, ext) {
       return inc.id == ext.id
         && inc.number == ext.number
@@ -166,6 +252,8 @@ service cloud.firestore {
         && inc.status in ['aberta', 'quitada', 'cancelada']
         && isListAppendOnly(inc.payments, ext.payments)
         && isListAppendOnly(inc.history, ext.history)
+        && refundsUnchanged(inc, ext)
+        && (!hasRefunds(ext) || hasFreshClientRev(inc, ext))
         && (ext.status == 'aberta' || (isAdmin() && inc.payments == ext.payments))
         && (
           inc.payments == ext.payments || (
@@ -175,6 +263,24 @@ service cloud.firestore {
             inc.payments[ext.payments.size()].amountCents > 0
           )
         );
+    }
+
+    function validGroupRentalRefundUpdate(inc, ext) {
+      return isAdmin()
+        && inc.id == ext.id
+        && inc.number == ext.number
+        && inc.totalAmountCents == ext.totalAmountCents
+        && ext.status in ['aberta', 'quitada']
+        && inc.status == 'aberta'
+        && !('closedAt' in inc)
+        && inc.payments == ext.payments
+        && inc.participants is list && ext.participants is list
+        && inc.participants.size() == ext.participants.size()
+        && isListAppendOnly(inc.history, ext.history)
+        && refundsAppendedByOne(inc, ext)
+        && validGroupRentalRefundEntry(inc.refunds[refundsCount(ext)])
+        && hasFreshClientRev(inc, ext)
+        && existsAfter(/databases/$(database)/documents/receipts/$(inc.refunds[refundsCount(ext)].receiptId));
     }
 
     function validCounterWrite(inc, currentResource) {
@@ -199,7 +305,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'id', 'origin', 'refId', 'refNumber', 'refLabel', 'method',
           'amountCents', 'paidAt', 'dateKey', 'staffUid', 'staffName',
-          'jointPaymentId', 'sourcePaymentId', 'kind'
+          'jointPaymentId', 'sourcePaymentId', 'refundId', 'reason', 'kind'
         ])
         && data.id == receiptId
         && data.origin in ['comanda', 'locacao']
@@ -214,7 +320,13 @@ service cloud.firestore {
         && data.staffName is string && data.staffName.size() > 0 && data.staffName.size() <= 128
         && data.sourcePaymentId is string && data.sourcePaymentId.size() > 0 && data.sourcePaymentId.size() <= 128
         && data.kind in ['recebimento', 'estorno']
-        && (!('jointPaymentId' in data) || (data.jointPaymentId is string && data.jointPaymentId.size() > 0 && data.jointPaymentId.size() <= 128));
+        && (!('jointPaymentId' in data) || (data.jointPaymentId is string && data.jointPaymentId.size() > 0 && data.jointPaymentId.size() <= 128))
+        && (
+          (data.kind == 'recebimento' && !('refundId' in data) && !('reason' in data)) ||
+          (data.kind == 'estorno'
+            && 'refundId' in data && data.refundId is string && data.refundId.size() > 0 && data.refundId.size() <= 128
+            && 'reason' in data && data.reason is string && data.reason.size() >= 3 && data.reason.size() <= 300)
+        );
     }
 
     function matchesOriginPaymentAfter(beforeDoc, afterDoc, data) {
@@ -224,6 +336,18 @@ service cloud.firestore {
         && afterDoc.data.payments[beforeDoc.data.payments.size()].id == data.sourcePaymentId
         && afterDoc.data.payments[beforeDoc.data.payments.size()].amountCents == data.amountCents
         && afterDoc.data.payments[beforeDoc.data.payments.size()].method == data.method;
+    }
+
+    function matchesOriginRefundAfter(beforeDoc, afterDoc, receiptId, data) {
+      return 'refunds' in afterDoc.data
+        && afterDoc.data.refunds is list
+        && afterDoc.data.refunds.size() == refundsCount(beforeDoc.data) + 1
+        && afterDoc.data.refunds[refundsCount(beforeDoc.data)].id == data.refundId
+        && afterDoc.data.refunds[refundsCount(beforeDoc.data)].receiptId == receiptId
+        && afterDoc.data.refunds[refundsCount(beforeDoc.data)].sourcePaymentId == data.sourcePaymentId
+        && afterDoc.data.refunds[refundsCount(beforeDoc.data)].amountCents == data.amountCents
+        && afterDoc.data.refunds[refundsCount(beforeDoc.data)].method == data.method
+        && afterDoc.data.refunds[refundsCount(beforeDoc.data)].reason == data.reason;
     }
 
     function isLiveTransactionReceipt(data) {
@@ -248,6 +372,35 @@ service cloud.firestore {
             && matchesOriginPaymentAfter(
                  get(/databases/$(database)/documents/group_rentals/$(data.refId)),
                  getAfter(/databases/$(database)/documents/group_rentals/$(data.refId)),
+                 data
+               ))
+        );
+    }
+
+    function isAdminRefundReceipt(receiptId, data) {
+      return isAdmin()
+        && data.kind == 'estorno'
+        && data.staffUid == request.auth.uid
+        && data.paidAt == request.time
+        && !('dateKey' in data)
+        && (
+          (data.origin == 'comanda'
+            && exists(/databases/$(database)/documents/comandas/$(data.refId))
+            && existsAfter(/databases/$(database)/documents/comandas/$(data.refId))
+            && matchesOriginRefundAfter(
+                 get(/databases/$(database)/documents/comandas/$(data.refId)),
+                 getAfter(/databases/$(database)/documents/comandas/$(data.refId)),
+                 receiptId,
+                 data
+               ))
+          ||
+          (data.origin == 'locacao'
+            && exists(/databases/$(database)/documents/group_rentals/$(data.refId))
+            && existsAfter(/databases/$(database)/documents/group_rentals/$(data.refId))
+            && matchesOriginRefundAfter(
+                 get(/databases/$(database)/documents/group_rentals/$(data.refId)),
+                 getAfter(/databases/$(database)/documents/group_rentals/$(data.refId)),
+                 receiptId,
                  data
                ))
         );
@@ -304,10 +457,14 @@ service cloud.firestore {
         && incoming().id == comandaId
         && incoming().status == 'aberta'
         && incoming().payments is list && incoming().payments.size() == 0
+        && (!('refunds' in incoming()) || (incoming().refunds is list && incoming().refunds.size() == 0))
         && incoming().items is list
         && incoming().history is list;
 
-      allow update: if isOperator() && isValidId(comandaId) && validComandaUpdate(incoming(), existing());
+      allow update: if isValidId(comandaId) && (
+        (isOperator() && validComandaUpdate(incoming(), existing())) ||
+        (isAdmin() && validComandaRefundUpdate(incoming(), existing()))
+      );
       allow delete: if isAdmin() && isValidId(comandaId);
     }
 
@@ -325,19 +482,27 @@ service cloud.firestore {
         && incoming().id == rentalId
         && incoming().status == 'aberta'
         && incoming().payments is list && incoming().payments.size() == 0
+        && (!('refunds' in incoming()) || (incoming().refunds is list && incoming().refunds.size() == 0))
         && incoming().history is list
         && incoming().totalAmountCents is int && incoming().totalAmountCents > 0;
 
-      allow update: if isOperator() && isValidId(rentalId) && validGroupRentalUpdate(incoming(), existing());
+      allow update: if isValidId(rentalId) && (
+        (isOperator() && validGroupRentalUpdate(incoming(), existing())) ||
+        (isAdmin() && validGroupRentalRefundUpdate(incoming(), existing()))
+      );
       allow delete: if isAdmin() && isValidId(rentalId);
     }
 
-    // Livro Append-Only de Recebimentos Financeiros (Leitura exclusiva do Administrador)
+    // Livro Append-Only de Recebimentos e Estornos Financeiros (Leitura exclusiva do Administrador)
     match /receipts/{receiptId} {
       allow get, list: if isAdmin();
       allow create: if isValidId(receiptId)
         && validReceiptPayload(receiptId, incoming())
-        && (isLiveTransactionReceipt(incoming()) || isAdminBackfillReceipt(incoming()));
+        && (
+          isLiveTransactionReceipt(incoming()) ||
+          isAdminRefundReceipt(receiptId, incoming()) ||
+          isAdminBackfillReceipt(incoming())
+        );
       allow update, delete: if false;
     }
 

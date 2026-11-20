@@ -23,18 +23,30 @@ interface NavItem {
 }
 
 export function Sidebar() {
-  const { activeModule, setActiveModule, metrics, currentStaff } = useComandas();
+  const {
+    activeModule,
+    setActiveModule,
+    metrics,
+    currentStaff,
+    comandasLoaded,
+    comandasSyncError,
+  } = useComandas();
   const isAdmin = currentStaff?.role === 'admin';
+  const openBadge = comandasLoaded && !comandasSyncError ? metrics.openCount : undefined;
 
   const navItems: NavItem[] = [
     { id: 'inicio', label: 'Início', icon: LayoutDashboard },
-    { id: 'comandas', label: 'Comandas', icon: Receipt, badge: metrics.openCount },
+    { id: 'comandas', label: 'Comandas', icon: Receipt, badge: openBadge },
     { id: 'agenda', label: 'Agenda', icon: CalendarDays },
     { id: 'alunos', label: 'Alunos e turmas', icon: GraduationCap },
     { id: 'mensalidades', label: 'Mensalidades', icon: CreditCard },
     { id: 'eventos', label: 'Eventos', icon: PartyPopper },
-    { id: 'caixa', label: 'Caixa', icon: Wallet },
-    ...(isAdmin ? [{ id: 'relatorios' as ActiveModule, label: 'Relatórios', icon: BarChart3 }] : []),
+    ...(isAdmin
+      ? [
+          { id: 'caixa' as ActiveModule, label: 'Caixa', icon: Wallet },
+          { id: 'relatorios' as ActiveModule, label: 'Relatórios', icon: BarChart3 },
+        ]
+      : []),
     { id: 'cadastros', label: 'Cadastros', icon: SlidersHorizontal },
   ];
 
@@ -85,7 +97,6 @@ export function Sidebar() {
         <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
           <p className="font-semibold text-slate-800">Complexo Esportivo</p>
           <p className="mt-0.5 text-slate-500">3 Quadras de Areia + 1 Society</p>
-          <p className="mt-2 text-[11px] text-slate-400">Versão 1.0 demonstrativa</p>
         </div>
       </div>
     </aside>

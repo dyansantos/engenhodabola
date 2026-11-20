@@ -2,9 +2,14 @@ import { defineConfig } from 'vitest/config';
 import path from 'node:path';
 
 export default defineConfig({
+  oxc: {
+    jsx: {
+      runtime: 'automatic',
+    },
+  },
   test: {
     environment: 'node',
-    include: ['lib/**/*.test.ts'],
+    include: ['lib/**/*.test.{ts,tsx}'],
   },
   resolve: {
     alias: {

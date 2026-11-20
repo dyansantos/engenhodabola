@@ -24,8 +24,19 @@ import {
   GroupRentalHistoryEntry,
   GroupPaymentAllocation,
   ReceiptDocument,
+  ComandaRefund,
+  GroupRentalRefund,
 } from './types';
-import { buildDeterministicReceiptId } from './reports/receipts';
+import {
+  buildDeterministicReceiptId,
+  buildDeterministicRefundReceiptId,
+} from './reports/receipts';
+import {
+  buildComandaRefundTransition,
+  buildGroupRentalRefundTransition,
+  nextClientRevFields,
+  translateStaleClientError,
+} from './refunds';
 
 export const methodLabels: Record<PaymentMethod, string> = {
   dinheiro: 'Dinheiro',
@@ -46,7 +57,8 @@ function assertOnline(operationName: string) {
 }
 
 /**
- * Calcula totais estritamente em centavos inteiros com base no registro real do banco.
+ * Calcula totais estritamente em centavos inteiros com base no registro real do banco,
+ * descontando os estornos registrados em `refunds`.
  */
 export function calculateServerComandaTotals(comanda: Comanda) {
   const totalConsumptionCents = (comanda.items || []).reduce((sum, item) => {
@@ -55,14 +67,26 @@ export function calculateServerComandaTotals(comanda: Comanda) {
     return sum + qty * price;
   }, 0);
 
-  const totalPaidCents = (comanda.payments || []).reduce((sum, pay) => {
+  const totalPaidGrossCents = (comanda.payments || []).reduce((sum, pay) => {
     const amt = Math.max(0, Math.floor(pay.amountCents || 0));
     return sum + amt;
   }, 0);
 
+  const totalRefundedCents = (comanda.refunds || []).reduce((sum, ref) => {
+    const amt = Math.max(0, Math.floor(ref.amountCents || 0));
+    return sum + amt;
+  }, 0);
+
+  const totalPaidCents = Math.max(0, totalPaidGrossCents - totalRefundedCents);
   const balanceCents = Math.max(0, totalConsumptionCents - totalPaidCents);
 
-  return { totalConsumptionCents, totalPaidCents, balanceCents };
+  return {
+    totalConsumptionCents,
+    totalPaidCents,
+    totalPaidGrossCents,
+    totalRefundedCents,
+    balanceCents,
+  };
 }
 
 /**
@@ -159,6 +183,7 @@ export async function atomicCreateComanda(params: {
       history: [historyEntry],
       lastModifiedByUid: params.operatorUid,
       lastModifiedAt: nowIso,
+      ...nextClientRevFields(),
       ...(params.table?.trim() ? { table: params.table.trim() } : {}),
       ...(params.responsible?.trim() ? { responsible: params.responsible.trim() } : {}),
     };
@@ -187,74 +212,91 @@ export async function atomicAddItem(params: {
 }): Promise<void> {
   const comandaRef = doc(db, 'comandas', params.comandaId);
 
-  await runTransaction(db, async transaction => {
-    const snap = await transaction.get(comandaRef);
-    if (!snap.exists()) {
-      throw new Error('Comanda não encontrada no servidor.');
-    }
+  let observedHasRefunds = false;
+  let observedClientRev: number | undefined;
 
-    const comanda = snap.data() as Comanda;
-    if (comanda.status !== 'aberta') {
-      throw new Error('Não é possível adicionar itens a uma comanda encerrada.');
-    }
+  try {
+    await runTransaction(db, async transaction => {
+      const snap = await transaction.get(comandaRef);
+      if (!snap.exists()) {
+        throw new Error('Comanda não encontrada no servidor.');
+      }
 
-    const qty = Math.floor(params.quantity);
-    if (qty <= 0) {
-      throw new Error('Quantidade inválida para o item.');
-    }
+      const comanda = snap.data() as Comanda;
+      observedHasRefunds = Array.isArray(comanda.refunds) && comanda.refunds.length > 0;
+      observedClientRev = comanda.clientRev;
 
-    const nowIso = new Date().toISOString();
-    const cleanNotes = params.notes?.trim() || undefined;
+      if (comanda.status !== 'aberta') {
+        throw new Error('Não é possível adicionar itens a uma comanda encerrada.');
+      }
 
-    const existingIndex = comanda.items.findIndex(
-      it => it.productId === params.product.id && it.notes === cleanNotes
-    );
+      const qty = Math.floor(params.quantity);
+      if (qty <= 0) {
+        throw new Error('Quantidade inválida para o item.');
+      }
 
-    let updatedItems: ComandaItem[];
-    if (existingIndex >= 0) {
-      updatedItems = comanda.items.map((it, idx) => {
-        if (idx === existingIndex) {
-          return {
-            ...it,
-            quantity: it.quantity + qty,
-          };
-        }
-        return it;
-      });
-    } else {
-      const newItem: ComandaItem = {
-        id: `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        productId: params.product.id,
-        name: params.product.name,
-        category: params.product.category,
-        priceCents: params.product.priceCents,
-        quantity: qty,
-        addedAt: nowIso,
-        addedByUid: params.operatorUid,
-        addedByName: params.operatorName,
-        ...(cleanNotes ? { notes: cleanNotes } : {}),
+      const nowIso = new Date().toISOString();
+      const cleanNotes = params.notes?.trim() || undefined;
+
+      const existingIndex = comanda.items.findIndex(
+        it => it.productId === params.product.id && it.notes === cleanNotes
+      );
+
+      let updatedItems: ComandaItem[];
+      if (existingIndex >= 0) {
+        updatedItems = comanda.items.map((it, idx) => {
+          if (idx === existingIndex) {
+            return {
+              ...it,
+              quantity: it.quantity + qty,
+            };
+          }
+          return it;
+        });
+      } else {
+        const newItem: ComandaItem = {
+          id: `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          productId: params.product.id,
+          name: params.product.name,
+          category: params.product.category,
+          priceCents: params.product.priceCents,
+          quantity: qty,
+          addedAt: nowIso,
+          addedByUid: params.operatorUid,
+          addedByName: params.operatorName,
+          ...(cleanNotes ? { notes: cleanNotes } : {}),
+        };
+        updatedItems = [...comanda.items, newItem];
+      }
+
+      const historyEntry: ComandaHistoryEntry = {
+        id: `hist-item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        timestamp: nowIso,
+        operator: params.operatorName,
+        operatorUid: params.operatorUid,
+        type: 'item_adicionado',
+        description: `Lançado: ${qty}x ${params.product.name}`,
+        ...(cleanNotes ? { details: `Obs: ${cleanNotes}` } : {}),
       };
-      updatedItems = [...comanda.items, newItem];
-    }
 
-    const historyEntry: ComandaHistoryEntry = {
-      id: `hist-item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      timestamp: nowIso,
-      operator: params.operatorName,
-      operatorUid: params.operatorUid,
-      type: 'item_adicionado',
-      description: `Lançado: ${qty}x ${params.product.name}`,
-      ...(cleanNotes ? { details: `Obs: ${cleanNotes}` } : {}),
-    };
-
-    transaction.set(comandaRef, sanitizeForFirestore({
-      ...comanda,
-      items: updatedItems,
-      history: [...comanda.history, historyEntry],
-      lastModifiedByUid: params.operatorUid,
-      lastModifiedAt: nowIso,
-    }));
-  });
+      transaction.set(comandaRef, sanitizeForFirestore({
+        ...comanda,
+        items: updatedItems,
+        history: [...comanda.history, historyEntry],
+        lastModifiedByUid: params.operatorUid,
+        lastModifiedAt: nowIso,
+        ...nextClientRevFields(comanda),
+      }));
+    });
+  } catch (err) {
+    throw new Error(
+      translateStaleClientError(err, {
+        hasRefunds: observedHasRefunds,
+        docClientRev: observedClientRev,
+        fallbackMessage: 'Falha ao lançar item no servidor.',
+      })
+    );
+  }
 }
 
 /**
@@ -270,67 +312,84 @@ export async function atomicUpdateItemQuantity(params: {
 }): Promise<void> {
   const comandaRef = doc(db, 'comandas', params.comandaId);
 
-  await runTransaction(db, async transaction => {
-    const snap = await transaction.get(comandaRef);
-    if (!snap.exists()) {
-      throw new Error('Comanda não encontrada no servidor.');
-    }
+  let observedHasRefunds = false;
+  let observedClientRev: number | undefined;
 
-    const comanda = snap.data() as Comanda;
-    if (comanda.status !== 'aberta') {
-      throw new Error('Não é possível alterar itens de uma comanda encerrada.');
-    }
+  try {
+    await runTransaction(db, async transaction => {
+      const snap = await transaction.get(comandaRef);
+      if (!snap.exists()) {
+        throw new Error('Comanda não encontrada no servidor.');
+      }
 
-    const targetItem = comanda.items.find(it => it.id === params.itemId);
-    if (!targetItem) {
-      throw new Error('Item não encontrado na comanda.');
-    }
+      const comanda = snap.data() as Comanda;
+      observedHasRefunds = Array.isArray(comanda.refunds) && comanda.refunds.length > 0;
+      observedClientRev = comanda.clientRev;
 
-    const cleanReason = params.reason.trim();
-    if (!cleanReason) {
-      throw new Error('O motivo do ajuste é obrigatório.');
-    }
+      if (comanda.status !== 'aberta') {
+        throw new Error('Não é possível alterar itens de uma comanda encerrada.');
+      }
 
-    const newQty = Math.max(0, Math.floor(params.quantity));
-    const nowIso = new Date().toISOString();
+      const targetItem = comanda.items.find(it => it.id === params.itemId);
+      if (!targetItem) {
+        throw new Error('Item não encontrado na comanda.');
+      }
 
-    let updatedItems: ComandaItem[];
-    let historyEntry: ComandaHistoryEntry;
+      const cleanReason = params.reason.trim();
+      if (!cleanReason) {
+        throw new Error('O motivo do ajuste é obrigatório.');
+      }
 
-    if (newQty === 0) {
-      updatedItems = comanda.items.filter(it => it.id !== params.itemId);
-      historyEntry = {
-        id: `hist-del-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        timestamp: nowIso,
-        operator: params.operatorName,
-        operatorUid: params.operatorUid,
-        type: 'item_removido',
-        description: `Cancelado: ${targetItem.quantity}x ${targetItem.name}`,
-        details: `Motivo: ${cleanReason}`,
-      };
-    } else {
-      updatedItems = comanda.items.map(it =>
-        it.id === params.itemId ? { ...it, quantity: newQty } : it
-      );
-      historyEntry = {
-        id: `hist-adj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        timestamp: nowIso,
-        operator: params.operatorName,
-        operatorUid: params.operatorUid,
-        type: 'item_removido',
-        description: `Quantidade ajustada de ${targetItem.name}: de ${targetItem.quantity} para ${newQty}`,
-        details: `Motivo: ${cleanReason}`,
-      };
-    }
+      const newQty = Math.max(0, Math.floor(params.quantity));
+      const nowIso = new Date().toISOString();
 
-    transaction.set(comandaRef, sanitizeForFirestore({
-      ...comanda,
-      items: updatedItems,
-      history: [...comanda.history, historyEntry],
-      lastModifiedByUid: params.operatorUid,
-      lastModifiedAt: nowIso,
-    }));
-  });
+      let updatedItems: ComandaItem[];
+      let historyEntry: ComandaHistoryEntry;
+
+      if (newQty === 0) {
+        updatedItems = comanda.items.filter(it => it.id !== params.itemId);
+        historyEntry = {
+          id: `hist-del-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          timestamp: nowIso,
+          operator: params.operatorName,
+          operatorUid: params.operatorUid,
+          type: 'item_removido',
+          description: `Cancelado: ${targetItem.quantity}x ${targetItem.name}`,
+          details: `Motivo: ${cleanReason}`,
+        };
+      } else {
+        updatedItems = comanda.items.map(it =>
+          it.id === params.itemId ? { ...it, quantity: newQty } : it
+        );
+        historyEntry = {
+          id: `hist-adj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          timestamp: nowIso,
+          operator: params.operatorName,
+          operatorUid: params.operatorUid,
+          type: 'item_removido',
+          description: `Quantidade ajustada de ${targetItem.name}: de ${targetItem.quantity} para ${newQty}`,
+          details: `Motivo: ${cleanReason}`,
+        };
+      }
+
+      transaction.set(comandaRef, sanitizeForFirestore({
+        ...comanda,
+        items: updatedItems,
+        history: [...comanda.history, historyEntry],
+        lastModifiedByUid: params.operatorUid,
+        lastModifiedAt: nowIso,
+        ...nextClientRevFields(comanda),
+      }));
+    });
+  } catch (err) {
+    throw new Error(
+      translateStaleClientError(err, {
+        hasRefunds: observedHasRefunds,
+        docClientRev: observedClientRev,
+        fallbackMessage: 'Falha ao ajustar quantidade no servidor.',
+      })
+    );
+  }
 }
 
 /**
@@ -349,126 +408,145 @@ export async function atomicTransferItems(params: {
   const sourceRef = doc(db, 'comandas', params.sourceId);
   const targetRef = doc(db, 'comandas', params.targetId);
 
-  await runTransaction(db, async transaction => {
-    // 1. Leituras estritas primeiro
-    const [sourceSnap, targetSnap] = await Promise.all([
-      transaction.get(sourceRef),
-      transaction.get(targetRef),
-    ]);
+  let observedHasRefunds = false;
+  let observedClientRev: number | undefined;
 
-    if (!sourceSnap.exists() || !targetSnap.exists()) {
-      throw new Error('Comanda de origem ou destino não encontrada no servidor.');
-    }
+  try {
+    await runTransaction(db, async transaction => {
+      // 1. Leituras estritas primeiro
+      const [sourceSnap, targetSnap] = await Promise.all([
+        transaction.get(sourceRef),
+        transaction.get(targetRef),
+      ]);
 
-    const source = sourceSnap.data() as Comanda;
-    const target = targetSnap.data() as Comanda;
-
-    if (source.status !== 'aberta' || target.status !== 'aberta') {
-      throw new Error('Ambas as comandas devem estar abertas para efetuar transferência.');
-    }
-
-    // 2. Validação da disponibilidade exata de cada item na origem
-    let updatedSourceItems = [...source.items];
-    let updatedTargetItems = [...target.items];
-    const transferredDescriptions: string[] = [];
-    const nowIso = new Date().toISOString();
-
-    for (const t of params.transfers) {
-      const qtyToTransfer = Math.floor(t.quantity);
-      if (qtyToTransfer <= 0) continue;
-
-      const sourceItemIndex = updatedSourceItems.findIndex(it => it.id === t.itemId);
-      if (sourceItemIndex === -1) {
-        throw new Error('Item a ser transferido não se encontra mais na comanda de origem.');
+      if (!sourceSnap.exists() || !targetSnap.exists()) {
+        throw new Error('Comanda de origem ou destino não encontrada no servidor.');
       }
 
-      const sourceItem = updatedSourceItems[sourceItemIndex];
-      if (sourceItem.quantity < qtyToTransfer) {
-        throw new Error(
-          `Quantidade insuficiente de "${sourceItem.name}" na origem: disponível ${sourceItem.quantity}, solicitado ${qtyToTransfer}. Outro operador pode ter alterado o item.`
+      const source = sourceSnap.data() as Comanda;
+      const target = targetSnap.data() as Comanda;
+      observedHasRefunds =
+        (Array.isArray(source.refunds) && source.refunds.length > 0) ||
+        (Array.isArray(target.refunds) && target.refunds.length > 0);
+      observedClientRev = Math.max(source.clientRev || 0, target.clientRev || 0) || undefined;
+
+      if (source.status !== 'aberta' || target.status !== 'aberta') {
+        throw new Error('Ambas as comandas devem estar abertas para efetuar transferência.');
+      }
+
+      // 2. Validação da disponibilidade exata de cada item na origem
+      let updatedSourceItems = [...source.items];
+      let updatedTargetItems = [...target.items];
+      const transferredDescriptions: string[] = [];
+      const nowIso = new Date().toISOString();
+
+      for (const t of params.transfers) {
+        const qtyToTransfer = Math.floor(t.quantity);
+        if (qtyToTransfer <= 0) continue;
+
+        const sourceItemIndex = updatedSourceItems.findIndex(it => it.id === t.itemId);
+        if (sourceItemIndex === -1) {
+          throw new Error('Item a ser transferido não se encontra mais na comanda de origem.');
+        }
+
+        const sourceItem = updatedSourceItems[sourceItemIndex];
+        if (sourceItem.quantity < qtyToTransfer) {
+          throw new Error(
+            `Quantidade insuficiente de "${sourceItem.name}" na origem: disponível ${sourceItem.quantity}, solicitado ${qtyToTransfer}. Outro operador pode ter alterado o item.`
+          );
+        }
+
+        // Decrementar ou remover da origem
+        if (sourceItem.quantity === qtyToTransfer) {
+          updatedSourceItems.splice(sourceItemIndex, 1);
+        } else {
+          updatedSourceItems[sourceItemIndex] = {
+            ...sourceItem,
+            quantity: sourceItem.quantity - qtyToTransfer,
+          };
+        }
+
+        // Acrescentar ou agrupar no destino
+        const targetItemIndex = updatedTargetItems.findIndex(
+          it => it.productId === sourceItem.productId && it.notes === sourceItem.notes
         );
+
+        if (targetItemIndex >= 0) {
+          updatedTargetItems[targetItemIndex] = {
+            ...updatedTargetItems[targetItemIndex],
+            quantity: updatedTargetItems[targetItemIndex].quantity + qtyToTransfer,
+          };
+        } else {
+          const newTargetItem: ComandaItem = {
+            id: `item-transf-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            productId: sourceItem.productId,
+            name: sourceItem.name,
+            category: sourceItem.category,
+            priceCents: sourceItem.priceCents,
+            quantity: qtyToTransfer,
+            addedAt: nowIso,
+            addedByUid: params.operatorUid,
+            addedByName: params.operatorName,
+            ...(sourceItem.notes ? { notes: sourceItem.notes } : {}),
+          };
+          updatedTargetItems.push(newTargetItem);
+        }
+
+        transferredDescriptions.push(`${qtyToTransfer}x ${sourceItem.name}`);
       }
 
-      // Decrementar ou remover da origem
-      if (sourceItem.quantity === qtyToTransfer) {
-        updatedSourceItems.splice(sourceItemIndex, 1);
-      } else {
-        updatedSourceItems[sourceItemIndex] = {
-          ...sourceItem,
-          quantity: sourceItem.quantity - qtyToTransfer,
-        };
+      if (transferredDescriptions.length === 0) {
+        throw new Error('Nenhum item válido selecionado para transferência.');
       }
 
-      // Acrescentar ou agrupar no destino
-      const targetItemIndex = updatedTargetItems.findIndex(
-        it => it.productId === sourceItem.productId && it.notes === sourceItem.notes
-      );
+      const summaryText = transferredDescriptions.join(', ');
 
-      if (targetItemIndex >= 0) {
-        updatedTargetItems[targetItemIndex] = {
-          ...updatedTargetItems[targetItemIndex],
-          quantity: updatedTargetItems[targetItemIndex].quantity + qtyToTransfer,
-        };
-      } else {
-        const newTargetItem: ComandaItem = {
-          id: `item-transf-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          productId: sourceItem.productId,
-          name: sourceItem.name,
-          category: sourceItem.category,
-          priceCents: sourceItem.priceCents,
-          quantity: qtyToTransfer,
-          addedAt: nowIso,
-          addedByUid: params.operatorUid,
-          addedByName: params.operatorName,
-          ...(sourceItem.notes ? { notes: sourceItem.notes } : {}),
-        };
-        updatedTargetItems.push(newTargetItem);
-      }
+      const sourceHistory: ComandaHistoryEntry = {
+        id: `hist-transf-src-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        timestamp: nowIso,
+        operator: params.operatorName,
+        operatorUid: params.operatorUid,
+        type: 'item_transferido',
+        description: `Transferido para comanda nº ${target.number}: ${summaryText}`,
+      };
 
-      transferredDescriptions.push(`${qtyToTransfer}x ${sourceItem.name}`);
-    }
+      const targetHistory: ComandaHistoryEntry = {
+        id: `hist-transf-tgt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        timestamp: nowIso,
+        operator: params.operatorName,
+        operatorUid: params.operatorUid,
+        type: 'item_transferido',
+        description: `Recebido da comanda nº ${source.number}: ${summaryText}`,
+      };
 
-    if (transferredDescriptions.length === 0) {
-      throw new Error('Nenhum item válido selecionado para transferência.');
-    }
+      // 3. Gravações atômicas coordenadas
+      transaction.set(sourceRef, sanitizeForFirestore({
+        ...source,
+        items: updatedSourceItems,
+        history: [...source.history, sourceHistory],
+        lastModifiedByUid: params.operatorUid,
+        lastModifiedAt: nowIso,
+        ...nextClientRevFields(source),
+      }));
 
-    const summaryText = transferredDescriptions.join(', ');
-
-    const sourceHistory: ComandaHistoryEntry = {
-      id: `hist-transf-src-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      timestamp: nowIso,
-      operator: params.operatorName,
-      operatorUid: params.operatorUid,
-      type: 'item_transferido',
-      description: `Transferido para comanda nº ${target.number}: ${summaryText}`,
-    };
-
-    const targetHistory: ComandaHistoryEntry = {
-      id: `hist-transf-tgt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      timestamp: nowIso,
-      operator: params.operatorName,
-      operatorUid: params.operatorUid,
-      type: 'item_transferido',
-      description: `Recebido da comanda nº ${source.number}: ${summaryText}`,
-    };
-
-    // 3. Gravações atômicas coordenadas
-    transaction.set(sourceRef, sanitizeForFirestore({
-      ...source,
-      items: updatedSourceItems,
-      history: [...source.history, sourceHistory],
-      lastModifiedByUid: params.operatorUid,
-      lastModifiedAt: nowIso,
-    }));
-
-    transaction.set(targetRef, sanitizeForFirestore({
-      ...target,
-      items: updatedTargetItems,
-      history: [...target.history, targetHistory],
-      lastModifiedByUid: params.operatorUid,
-      lastModifiedAt: nowIso,
-    }));
-  });
+      transaction.set(targetRef, sanitizeForFirestore({
+        ...target,
+        items: updatedTargetItems,
+        history: [...target.history, targetHistory],
+        lastModifiedByUid: params.operatorUid,
+        lastModifiedAt: nowIso,
+        ...nextClientRevFields(target),
+      }));
+    });
+  } catch (err) {
+    throw new Error(
+      translateStaleClientError(err, {
+        hasRefunds: observedHasRefunds,
+        docClientRev: observedClientRev,
+        fallbackMessage: 'Falha ao transferir itens no servidor.',
+      })
+    );
+  }
 }
 
 /**
@@ -490,124 +568,140 @@ export async function atomicRegisterPayment(params: {
   const receiptId = buildDeterministicReceiptId('comanda', params.comandaId, params.operationId);
   const receiptRef = doc(db, 'receipts', receiptId);
 
-  return runTransaction(db, async transaction => {
-    const [snap, receiptSnap] = await Promise.all([
-      transaction.get(comandaRef),
-      transaction.get(receiptRef),
-    ]);
-    if (!snap.exists()) {
-      throw new Error('Comanda não encontrada no servidor.');
-    }
+  let observedHasRefunds = false;
+  let observedClientRev: number | undefined;
 
-    const comanda = snap.data() as Comanda;
-
-    // 1. CHECAGEM DE IDEMPOTÊNCIA: Verificar se este operationId já foi persistido no banco
-    const existing = (comanda.payments || []).find(
-      p => p.id === params.operationId || p.clientNonce === params.operationId
-    );
-    if (existing) {
-      return {
-        changeCents: existing.changeCents || 0,
-        alreadyProcessed: true,
-        payment: existing,
-      };
-    }
-
-    if (comanda.status !== 'aberta') {
-      throw new Error('Não é possível registrar pagamentos em comanda já encerrada.');
-    }
-
-    // 2. CONCORRÊNCIA E SALDO EM TEMPO REAL: Calcular saldo diretamente do servidor
-    const { balanceCents } = calculateServerComandaTotals(comanda);
-
-    if (balanceCents <= 0) {
-      throw new Error('Esta comanda já está totalmente quitada.');
-    }
-
-    if (params.amountCents > balanceCents) {
-      throw new Error(
-        `O valor do pagamento (R$ ${(params.amountCents / 100).toFixed(
-          2
-        )}) ultrapassa o saldo atual de R$ ${(balanceCents / 100).toFixed(
-          2
-        )}. Outro pagamento pode ter sido registrado simultaneamente.`
-      );
-    }
-
-    const now = new Date();
-    const nowIso = now.toISOString();
-    let changeCents = 0;
-    let tenderedCents = params.tenderedCents;
-
-    if (params.method === 'dinheiro') {
-      if (typeof tenderedCents !== 'number' || tenderedCents < params.amountCents) {
-        tenderedCents = params.amountCents;
+  try {
+    return await runTransaction(db, async transaction => {
+      const [snap, receiptSnap] = await Promise.all([
+        transaction.get(comandaRef),
+        transaction.get(receiptRef),
+      ]);
+      if (!snap.exists()) {
+        throw new Error('Comanda não encontrada no servidor.');
       }
-      changeCents = Math.max(0, tenderedCents - params.amountCents);
-    } else {
-      tenderedCents = undefined;
-      changeCents = 0;
-    }
 
-    const newPayment: PaymentRecord = {
-      id: params.operationId,
-      method: params.method,
-      amountCents: params.amountCents,
-      timestamp: nowIso,
-      operator: params.operatorName,
-      operatorUid: params.operatorUid,
-      clientNonce: params.operationId,
-      ...(params.method === 'dinheiro' && typeof tenderedCents === 'number'
-        ? { tenderedCents }
-        : {}),
-      ...(params.method === 'dinheiro' && changeCents > 0
-        ? { changeCents }
-        : {}),
-    };
+      const comanda = snap.data() as Comanda;
+      observedHasRefunds = Array.isArray(comanda.refunds) && comanda.refunds.length > 0;
+      observedClientRev = comanda.clientRev;
 
-    const historyEntry: ComandaHistoryEntry = {
-      id: `hist-pay-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      timestamp: nowIso,
-      operator: params.operatorName,
-      operatorUid: params.operatorUid,
-      type: 'pagamento',
-      description: `Pagamento de R$ ${(params.amountCents / 100).toFixed(2)} via ${methodLabels[params.method]}`,
-      ...(changeCents > 0 ? { details: `Troco devolvido: R$ ${(changeCents / 100).toFixed(2)}` } : {}),
-    };
+      // 1. CHECAGEM DE IDEMPOTÊNCIA: Verificar se este operationId já foi persistido no banco
+      const existing = (comanda.payments || []).find(
+        p => p.id === params.operationId || p.clientNonce === params.operationId
+      );
+      if (existing) {
+        return {
+          changeCents: existing.changeCents || 0,
+          alreadyProcessed: true,
+          payment: existing,
+        };
+      }
 
-    transaction.set(comandaRef, sanitizeForFirestore({
-      ...comanda,
-      payments: [...(comanda.payments || []), newPayment],
-      history: [...(comanda.history || []), historyEntry],
-      lastModifiedByUid: params.operatorUid,
-      lastModifiedAt: nowIso,
-    }));
+      if (comanda.status !== 'aberta') {
+        throw new Error('Não é possível registrar pagamentos em comanda já encerrada.');
+      }
 
-    if (!receiptSnap.exists()) {
-      const refLabel = comanda.table ? `${comanda.name} (${comanda.table})` : comanda.name;
-      const receiptDoc: ReceiptDocument = {
-        id: receiptId,
-        origin: 'comanda',
-        refId: comanda.id,
-        refNumber: comanda.number,
-        refLabel,
+      // 2. CONCORRÊNCIA E SALDO EM TEMPO REAL: Calcular saldo diretamente do servidor (descontando estornos)
+      const { balanceCents } = calculateServerComandaTotals(comanda);
+
+      if (balanceCents <= 0) {
+        throw new Error('Esta comanda já está totalmente quitada.');
+      }
+
+      if (params.amountCents > balanceCents) {
+        throw new Error(
+          `O valor do pagamento (R$ ${(params.amountCents / 100).toFixed(
+            2
+          )}) ultrapassa o saldo atual de R$ ${(balanceCents / 100).toFixed(
+            2
+          )}. Outro pagamento pode ter sido registrado simultaneamente.`
+        );
+      }
+
+      const now = new Date();
+      const nowIso = now.toISOString();
+      let changeCents = 0;
+      let tenderedCents = params.tenderedCents;
+
+      if (params.method === 'dinheiro') {
+        if (typeof tenderedCents !== 'number' || tenderedCents < params.amountCents) {
+          tenderedCents = params.amountCents;
+        }
+        changeCents = Math.max(0, tenderedCents - params.amountCents);
+      } else {
+        tenderedCents = undefined;
+        changeCents = 0;
+      }
+
+      const newPayment: PaymentRecord = {
+        id: params.operationId,
         method: params.method,
-        amountCents: params.amountCents, // Troco nunca entra como receita
-        paidAt: serverTimestamp(),
-        staffUid: params.operatorUid,
-        staffName: params.operatorName,
-        sourcePaymentId: newPayment.id,
-        kind: 'recebimento',
+        amountCents: params.amountCents,
+        timestamp: nowIso,
+        operator: params.operatorName,
+        operatorUid: params.operatorUid,
+        clientNonce: params.operationId,
+        ...(params.method === 'dinheiro' && typeof tenderedCents === 'number'
+          ? { tenderedCents }
+          : {}),
+        ...(params.method === 'dinheiro' && changeCents > 0
+          ? { changeCents }
+          : {}),
       };
-      transaction.set(receiptRef, sanitizeForFirestore(receiptDoc));
-    }
 
-    return {
-      changeCents,
-      alreadyProcessed: false,
-      payment: newPayment,
-    };
-  });
+      const historyEntry: ComandaHistoryEntry = {
+        id: `hist-pay-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        timestamp: nowIso,
+        operator: params.operatorName,
+        operatorUid: params.operatorUid,
+        type: 'pagamento',
+        description: `Pagamento de R$ ${(params.amountCents / 100).toFixed(2)} via ${methodLabels[params.method]}`,
+        ...(changeCents > 0 ? { details: `Troco devolvido: R$ ${(changeCents / 100).toFixed(2)}` } : {}),
+      };
+
+      transaction.set(comandaRef, sanitizeForFirestore({
+        ...comanda,
+        payments: [...(comanda.payments || []), newPayment],
+        history: [...(comanda.history || []), historyEntry],
+        lastModifiedByUid: params.operatorUid,
+        lastModifiedAt: nowIso,
+        ...nextClientRevFields(comanda),
+      }));
+
+      if (!receiptSnap.exists()) {
+        const refLabel = comanda.table ? `${comanda.name} (${comanda.table})` : comanda.name;
+        const receiptDoc: ReceiptDocument = {
+          id: receiptId,
+          origin: 'comanda',
+          refId: comanda.id,
+          refNumber: comanda.number,
+          refLabel,
+          method: params.method,
+          amountCents: params.amountCents, // Troco nunca entra como receita
+          paidAt: serverTimestamp(),
+          staffUid: params.operatorUid,
+          staffName: params.operatorName,
+          sourcePaymentId: newPayment.id,
+          kind: 'recebimento',
+        };
+        transaction.set(receiptRef, sanitizeForFirestore(receiptDoc));
+      }
+
+      return {
+        changeCents,
+        alreadyProcessed: false,
+        payment: newPayment,
+      };
+    });
+  } catch (err) {
+    throw new Error(
+      translateStaleClientError(err, {
+        hasRefunds: observedHasRefunds,
+        docClientRev: observedClientRev,
+        fallbackMessage: 'Falha ao processar pagamento no servidor.',
+      })
+    );
+  }
 }
 
 /**
@@ -644,46 +738,151 @@ export async function atomicCloseComanda(params: {
 
   const comandaRef = doc(db, 'comandas', params.comandaId);
 
-  await runTransaction(db, async transaction => {
-    const snap = await transaction.get(comandaRef);
-    if (!snap.exists()) {
-      throw new Error('Comanda não encontrada no servidor.');
-    }
+  let observedHasRefunds = false;
+  let observedClientRev: number | undefined;
 
-    const comanda = snap.data() as Comanda;
-    if (comanda.status === 'encerrada') {
-      return; // Já encerrada
-    }
+  try {
+    await runTransaction(db, async transaction => {
+      const snap = await transaction.get(comandaRef);
+      if (!snap.exists()) {
+        throw new Error('Comanda não encontrada no servidor.');
+      }
 
-    const { balanceCents } = calculateServerComandaTotals(comanda);
-    if (balanceCents > 0) {
-      throw new Error(
-        `Não é possível encerrar uma comanda com saldo pendente de R$ ${(balanceCents / 100).toFixed(
-          2
-        )}. Registre a quitação antes de encerrar.`
-      );
-    }
+      const comanda = snap.data() as Comanda;
+      observedHasRefunds = Array.isArray(comanda.refunds) && comanda.refunds.length > 0;
+      observedClientRev = comanda.clientRev;
 
-    const nowIso = new Date().toISOString();
+      if (comanda.status === 'encerrada') {
+        return; // Já encerrada
+      }
 
-    const historyEntry: ComandaHistoryEntry = {
-      id: `hist-close-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      timestamp: nowIso,
-      operator: params.operatorName,
-      operatorUid: params.operatorUid,
-      type: 'encerramento',
-      description: `Comanda encerrada com conta totalmente quitada.`,
-    };
+      const { balanceCents } = calculateServerComandaTotals(comanda);
+      if (balanceCents > 0) {
+        throw new Error(
+          `Não é possível encerrar uma comanda com saldo pendente de R$ ${(balanceCents / 100).toFixed(
+            2
+          )}. Registre a quitação antes de encerrar.`
+        );
+      }
 
-    transaction.set(comandaRef, sanitizeForFirestore({
-      ...comanda,
-      status: 'encerrada',
-      closedAt: nowIso,
-      history: [...comanda.history, historyEntry],
-      lastModifiedByUid: params.operatorUid,
-      lastModifiedAt: nowIso,
-    }));
-  });
+      const nowIso = new Date().toISOString();
+
+      const historyEntry: ComandaHistoryEntry = {
+        id: `hist-close-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        timestamp: nowIso,
+        operator: params.operatorName,
+        operatorUid: params.operatorUid,
+        type: 'encerramento',
+        description: `Comanda encerrada com conta totalmente quitada.`,
+      };
+
+      transaction.set(comandaRef, sanitizeForFirestore({
+        ...comanda,
+        status: 'encerrada',
+        closedAt: nowIso,
+        history: [...comanda.history, historyEntry],
+        lastModifiedByUid: params.operatorUid,
+        lastModifiedAt: nowIso,
+        ...nextClientRevFields(comanda),
+      }));
+    });
+  } catch (err) {
+    throw new Error(
+      translateStaleClientError(err, {
+        hasRefunds: observedHasRefunds,
+        docClientRev: observedClientRev,
+        fallbackMessage: 'Falha ao encerrar comanda no servidor.',
+      })
+    );
+  }
+}
+
+/**
+ * Registro atômico de estorno de pagamento em comanda (somente Administrador).
+ * - Nunca edita nem remove o pagamento original em `payments[]`.
+ * - Acrescenta lançamento novo em `refunds[]` e na coleção append-only `receipts` com `kind: 'estorno'` e `paidAt: serverTimestamp()`.
+ * - Comanda encerrada é reaberta automaticamente (`status: 'aberta'`, sem `closedAt`).
+ */
+export async function atomicRefundComandaPayment(params: {
+  comandaId: string;
+  sourcePaymentId: string;
+  amountCents: number;
+  reason: string;
+  clientNonce: string;
+  adminUid: string;
+  adminName: string;
+}): Promise<{ alreadyProcessed: boolean; refund: ComandaRefund; reopened: boolean }> {
+  assertOnline('Registro de Estorno de Comanda');
+
+  const comandaRef = doc(db, 'comandas', params.comandaId);
+  const receiptId = buildDeterministicRefundReceiptId('comanda', params.comandaId, params.clientNonce);
+  const receiptRef = doc(db, 'receipts', receiptId);
+
+  let observedHasRefunds = false;
+  let observedClientRev: number | undefined;
+
+  try {
+    return await runTransaction(db, async transaction => {
+      const [snap, receiptSnap] = await Promise.all([
+        transaction.get(comandaRef),
+        transaction.get(receiptRef),
+      ]);
+
+      if (!snap.exists()) {
+        throw new Error('Comanda não encontrada no servidor.');
+      }
+
+      const comanda = snap.data() as Comanda;
+      observedHasRefunds = Array.isArray(comanda.refunds) && comanda.refunds.length > 0;
+      observedClientRev = comanda.clientRev;
+
+      const transition = buildComandaRefundTransition({
+        comanda,
+        sourcePaymentId: params.sourcePaymentId,
+        amountCents: params.amountCents,
+        reason: params.reason,
+        clientNonce: params.clientNonce,
+        adminUid: params.adminUid,
+        adminName: params.adminName,
+      });
+
+      if (!transition.ok) {
+        throw new Error(transition.error);
+      }
+
+      if (transition.idempotent) {
+        return {
+          alreadyProcessed: true,
+          refund: transition.refund,
+          reopened: false,
+        };
+      }
+
+      transaction.set(comandaRef, sanitizeForFirestore(transition.updatedComanda));
+
+      if (!receiptSnap.exists()) {
+        const receiptDoc: ReceiptDocument = {
+          ...transition.receiptPayload,
+          paidAt: serverTimestamp(),
+        };
+        transaction.set(receiptRef, sanitizeForFirestore(receiptDoc));
+      }
+
+      return {
+        alreadyProcessed: false,
+        refund: transition.refund,
+        reopened: transition.reopened,
+      };
+    });
+  } catch (err) {
+    throw new Error(
+      translateStaleClientError(err, {
+        hasRefunds: observedHasRefunds,
+        docClientRev: observedClientRev,
+        fallbackMessage: 'Falha ao registrar estorno da comanda no servidor.',
+      })
+    );
+  }
 }
 
 // ============================================================================
@@ -711,6 +910,8 @@ export function calculateEqualDivisionCents(totalAmountCents: number, count: num
 
 /**
  * Calcula totais consolidados de uma locação em grupo.
+ * `totalPaidCents` reflete a soma líquida atual de `participants[].paidAmountCents`
+ * (que já é decrementada quando ocorre um estorno).
  */
 export function calculateGroupRentalTotals(rental: GroupRental) {
   const totalAmountCents = Math.max(0, Math.floor(rental.totalAmountCents || 0));
@@ -718,6 +919,8 @@ export function calculateGroupRentalTotals(rental: GroupRental) {
 
   const totalDueCents = participants.reduce((sum, p) => sum + Math.max(0, Math.floor(p.dueAmountCents || 0)), 0);
   const totalPaidCents = participants.reduce((sum, p) => sum + Math.max(0, Math.floor(p.paidAmountCents || 0)), 0);
+  const totalPaidGrossCents = (rental.payments || []).reduce((sum, p) => sum + Math.max(0, Math.floor(p.amountCents || 0)), 0);
+  const totalRefundedCents = (rental.refunds || []).reduce((sum, r) => sum + Math.max(0, Math.floor(r.amountCents || 0)), 0);
   const pendingBalanceCents = Math.max(0, totalAmountCents - totalPaidCents);
 
   const paidParticipantsCount = participants.filter(p => p.status === 'pago').length;
@@ -727,6 +930,8 @@ export function calculateGroupRentalTotals(rental: GroupRental) {
     totalAmountCents,
     totalDueCents,
     totalPaidCents,
+    totalPaidGrossCents,
+    totalRefundedCents,
     pendingBalanceCents,
     paidParticipantsCount,
     totalParticipantsCount,
@@ -828,6 +1033,7 @@ export async function atomicCreateGroupRental(params: {
       createdByName: params.operatorName,
       lastModifiedAt: nowIso,
       lastModifiedByUid: params.operatorUid,
+      ...nextClientRevFields(),
     };
 
     transaction.set(counterRef, sanitizeForFirestore({
@@ -853,50 +1059,67 @@ export async function atomicUpdateParticipantName(params: {
 }): Promise<void> {
   const rentalRef = doc(db, 'group_rentals', params.rentalId);
 
-  await runTransaction(db, async transaction => {
-    const snap = await transaction.get(rentalRef);
-    if (!snap.exists()) {
-      throw new Error('Locação em grupo não encontrada no servidor.');
-    }
+  let observedHasRefunds = false;
+  let observedClientRev: number | undefined;
 
-    const rental = snap.data() as GroupRental;
-    const cleanName = params.newName.trim();
-    if (!cleanName) {
-      throw new Error('O nome do participante não pode ser vazio.');
-    }
+  try {
+    await runTransaction(db, async transaction => {
+      const snap = await transaction.get(rentalRef);
+      if (!snap.exists()) {
+        throw new Error('Locação em grupo não encontrada no servidor.');
+      }
 
-    const participant = rental.participants.find(p => p.id === params.participantId);
-    if (!participant) {
-      throw new Error('Participante não encontrado nesta locação.');
-    }
+      const rental = snap.data() as GroupRental;
+      observedHasRefunds = Array.isArray(rental.refunds) && rental.refunds.length > 0;
+      observedClientRev = rental.clientRev;
 
-    if (participant.name === cleanName) {
-      return; // Nada mudou
-    }
+      const cleanName = params.newName.trim();
+      if (!cleanName) {
+        throw new Error('O nome do participante não pode ser vazio.');
+      }
 
-    const oldName = participant.name;
-    const updatedParticipants = rental.participants.map(p =>
-      p.id === params.participantId ? { ...p, name: cleanName } : p
+      const participant = rental.participants.find(p => p.id === params.participantId);
+      if (!participant) {
+        throw new Error('Participante não encontrado nesta locação.');
+      }
+
+      if (participant.name === cleanName) {
+        return; // Nada mudou
+      }
+
+      const oldName = participant.name;
+      const updatedParticipants = rental.participants.map(p =>
+        p.id === params.participantId ? { ...p, name: cleanName } : p
+      );
+
+      const nowIso = new Date().toISOString();
+      const historyEntry: GroupRentalHistoryEntry = {
+        id: `hist-gr-rename-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        timestamp: nowIso,
+        operator: params.operatorName,
+        operatorUid: params.operatorUid,
+        type: 'ajuste_divisao',
+        description: `Participante "${oldName}" renomeado para "${cleanName}"`,
+      };
+
+      transaction.set(rentalRef, sanitizeForFirestore({
+        ...rental,
+        participants: updatedParticipants,
+        history: [...(rental.history || []), historyEntry],
+        lastModifiedAt: nowIso,
+        lastModifiedByUid: params.operatorUid,
+        ...nextClientRevFields(rental),
+      }));
+    });
+  } catch (err) {
+    throw new Error(
+      translateStaleClientError(err, {
+        hasRefunds: observedHasRefunds,
+        docClientRev: observedClientRev,
+        fallbackMessage: 'Falha ao renomear participante.',
+      })
     );
-
-    const nowIso = new Date().toISOString();
-    const historyEntry: GroupRentalHistoryEntry = {
-      id: `hist-gr-rename-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      timestamp: nowIso,
-      operator: params.operatorName,
-      operatorUid: params.operatorUid,
-      type: 'ajuste_divisao',
-      description: `Participante "${oldName}" renomeado para "${cleanName}"`,
-    };
-
-    transaction.set(rentalRef, sanitizeForFirestore({
-      ...rental,
-      participants: updatedParticipants,
-      history: [...(rental.history || []), historyEntry],
-      lastModifiedAt: nowIso,
-      lastModifiedByUid: params.operatorUid,
-    }));
-  });
+  }
 }
 
 /**
@@ -915,73 +1138,90 @@ export async function atomicAdjustGroupDivision(params: {
 
   const rentalRef = doc(db, 'group_rentals', params.rentalId);
 
-  await runTransaction(db, async transaction => {
-    const snap = await transaction.get(rentalRef);
-    if (!snap.exists()) {
-      throw new Error('Locação em grupo não encontrada.');
-    }
+  let observedHasRefunds = false;
+  let observedClientRev: number | undefined;
 
-    const rental = snap.data() as GroupRental;
-    if (rental.status !== 'aberta') {
-      throw new Error('Não é possível alterar divisões de uma locação já finalizada.');
-    }
+  try {
+    await runTransaction(db, async transaction => {
+      const snap = await transaction.get(rentalRef);
+      if (!snap.exists()) {
+        throw new Error('Locação em grupo não encontrada.');
+      }
 
-    // Validar soma total das novas partes
-    const sumNewDues = params.newDueAmounts.reduce((sum, item) => sum + Math.max(0, Math.floor(item.dueAmountCents)), 0);
-    if (sumNewDues !== rental.totalAmountCents) {
-      throw new Error(
-        `A soma das partes (R$ ${(sumNewDues / 100).toFixed(2)}) deve ser exatamente igual ao total da locação (R$ ${(
-          rental.totalAmountCents / 100
-        ).toFixed(2)}). Diferença: R$ ${((rental.totalAmountCents - sumNewDues) / 100).toFixed(2)}.`
-      );
-    }
+      const rental = snap.data() as GroupRental;
+      observedHasRefunds = Array.isArray(rental.refunds) && rental.refunds.length > 0;
+      observedClientRev = rental.clientRev;
 
-    // Validar integridade contra valores já pagos
-    const updatedParticipants: GroupParticipant[] = rental.participants.map(p => {
-      const target = params.newDueAmounts.find(item => item.participantId === p.id);
-      if (!target) return p;
+      if (rental.status !== 'aberta') {
+        throw new Error('Não é possível alterar divisões de uma locação já finalizada.');
+      }
 
-      const newDue = Math.max(0, Math.floor(target.dueAmountCents));
-      if (newDue < p.paidAmountCents) {
+      // Validar soma total das novas partes
+      const sumNewDues = params.newDueAmounts.reduce((sum, item) => sum + Math.max(0, Math.floor(item.dueAmountCents)), 0);
+      if (sumNewDues !== rental.totalAmountCents) {
         throw new Error(
-          `O participante "${p.name}" já pagou R$ ${(p.paidAmountCents / 100).toFixed(
-            2
-          )}. Sua parte não pode ser reduzida para R$ ${(newDue / 100).toFixed(2)}.`
+          `A soma das partes (R$ ${(sumNewDues / 100).toFixed(2)}) deve ser exatamente igual ao total da locação (R$ ${(
+            rental.totalAmountCents / 100
+          ).toFixed(2)}). Diferença: R$ ${((rental.totalAmountCents - sumNewDues) / 100).toFixed(2)}.`
         );
       }
 
-      let newStatus: import('./types').ParticipantStatus = 'pendente';
-      if (p.paidAmountCents >= newDue && newDue > 0) {
-        newStatus = 'pago';
-      } else if (p.paidAmountCents > 0) {
-        newStatus = 'parcial';
-      }
+      // Validar integridade contra valores já pagos
+      const updatedParticipants: GroupParticipant[] = rental.participants.map(p => {
+        const target = params.newDueAmounts.find(item => item.participantId === p.id);
+        if (!target) return p;
 
-      return {
-        ...p,
-        dueAmountCents: newDue,
-        status: newStatus,
+        const newDue = Math.max(0, Math.floor(target.dueAmountCents));
+        if (newDue < p.paidAmountCents) {
+          throw new Error(
+            `O participante "${p.name}" já pagou R$ ${(p.paidAmountCents / 100).toFixed(
+              2
+            )}. Sua parte não pode ser reduzida para R$ ${(newDue / 100).toFixed(2)}.`
+          );
+        }
+
+        let newStatus: import('./types').ParticipantStatus = 'pendente';
+        if (p.paidAmountCents >= newDue && newDue > 0) {
+          newStatus = 'pago';
+        } else if (p.paidAmountCents > 0) {
+          newStatus = 'parcial';
+        }
+
+        return {
+          ...p,
+          dueAmountCents: newDue,
+          status: newStatus,
+        };
+      });
+
+      const nowIso = new Date().toISOString();
+      const historyEntry: GroupRentalHistoryEntry = {
+        id: `hist-gr-adj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        timestamp: nowIso,
+        operator: params.operatorName,
+        operatorUid: params.operatorUid,
+        type: 'ajuste_divisao',
+        description: `Divisão de valores entre participantes reajustada com validação de soma.`,
       };
+
+      transaction.set(rentalRef, sanitizeForFirestore({
+        ...rental,
+        participants: updatedParticipants,
+        history: [...(rental.history || []), historyEntry],
+        lastModifiedAt: nowIso,
+        lastModifiedByUid: params.operatorUid,
+        ...nextClientRevFields(rental),
+      }));
     });
-
-    const nowIso = new Date().toISOString();
-    const historyEntry: GroupRentalHistoryEntry = {
-      id: `hist-gr-adj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      timestamp: nowIso,
-      operator: params.operatorName,
-      operatorUid: params.operatorUid,
-      type: 'ajuste_divisao',
-      description: `Divisão de valores entre participantes reajustada com validação de soma.`,
-    };
-
-    transaction.set(rentalRef, sanitizeForFirestore({
-      ...rental,
-      participants: updatedParticipants,
-      history: [...(rental.history || []), historyEntry],
-      lastModifiedAt: nowIso,
-      lastModifiedByUid: params.operatorUid,
-    }));
-  });
+  } catch (err) {
+    throw new Error(
+      translateStaleClientError(err, {
+        hasRefunds: observedHasRefunds,
+        docClientRev: observedClientRev,
+        fallbackMessage: 'Falha ao ajustar divisão da locação.',
+      })
+    );
+  }
 }
 
 /**
@@ -996,67 +1236,84 @@ export async function atomicLinkBarComanda(params: {
 }): Promise<void> {
   const rentalRef = doc(db, 'group_rentals', params.rentalId);
 
-  await runTransaction(db, async transaction => {
-    const snap = await transaction.get(rentalRef);
-    if (!snap.exists()) {
-      throw new Error('Locação em grupo não encontrada.');
-    }
+  let observedHasRefunds = false;
+  let observedClientRev: number | undefined;
 
-    const rental = snap.data() as GroupRental;
-    const participant = rental.participants.find(p => p.id === params.participantId);
-    if (!participant) {
-      throw new Error('Participante não encontrado.');
-    }
+  try {
+    await runTransaction(db, async transaction => {
+      const snap = await transaction.get(rentalRef);
+      if (!snap.exists()) {
+        throw new Error('Locação em grupo não encontrada.');
+      }
 
-    let comandaNumberDesc = '';
-    if (params.comandaId) {
-      const comandaRef = doc(db, 'comandas', params.comandaId);
-      const cmdSnap = await transaction.get(comandaRef);
-      if (!cmdSnap.exists()) {
-        throw new Error('Comanda de bar vinculada não encontrada.');
-      }
-      const cmd = cmdSnap.data() as Comanda;
-      if (cmd.status !== 'aberta') {
-        throw new Error('A comanda informada já está encerrada.');
-      }
-      comandaNumberDesc = `Comanda #${cmd.number} (${cmd.name})`;
-    }
+      const rental = snap.data() as GroupRental;
+      observedHasRefunds = Array.isArray(rental.refunds) && rental.refunds.length > 0;
+      observedClientRev = rental.clientRev;
 
-    const updatedParticipants = rental.participants.map(p => {
-      if (p.id === params.participantId) {
-        const item: GroupParticipant = {
-          id: p.id,
-          name: p.name,
-          dueAmountCents: p.dueAmountCents,
-          paidAmountCents: p.paidAmountCents,
-          status: p.status,
-          ...(params.comandaId ? { linkedComandaId: params.comandaId } : {}),
-        };
-        return item;
+      const participant = rental.participants.find(p => p.id === params.participantId);
+      if (!participant) {
+        throw new Error('Participante não encontrado.');
       }
-      return p;
+
+      let comandaNumberDesc = '';
+      if (params.comandaId) {
+        const comandaRef = doc(db, 'comandas', params.comandaId);
+        const cmdSnap = await transaction.get(comandaRef);
+        if (!cmdSnap.exists()) {
+          throw new Error('Comanda de bar vinculada não encontrada.');
+        }
+        const cmd = cmdSnap.data() as Comanda;
+        if (cmd.status !== 'aberta') {
+          throw new Error('A comanda informada já está encerrada.');
+        }
+        comandaNumberDesc = `Comanda #${cmd.number} (${cmd.name})`;
+      }
+
+      const updatedParticipants = rental.participants.map(p => {
+        if (p.id === params.participantId) {
+          const item: GroupParticipant = {
+            id: p.id,
+            name: p.name,
+            dueAmountCents: p.dueAmountCents,
+            paidAmountCents: p.paidAmountCents,
+            status: p.status,
+            ...(params.comandaId ? { linkedComandaId: params.comandaId } : {}),
+          };
+          return item;
+        }
+        return p;
+      });
+
+      const nowIso = new Date().toISOString();
+      const historyEntry: GroupRentalHistoryEntry = {
+        id: `hist-gr-link-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        timestamp: nowIso,
+        operator: params.operatorName,
+        operatorUid: params.operatorUid,
+        type: 'vinculo_bar',
+        description: params.comandaId
+          ? `Participante "${participant.name}" vinculado à ${comandaNumberDesc}`
+          : `Vínculo de comanda do bar removido de "${participant.name}"`,
+      };
+
+      transaction.set(rentalRef, sanitizeForFirestore({
+        ...rental,
+        participants: updatedParticipants,
+        history: [...(rental.history || []), historyEntry],
+        lastModifiedAt: nowIso,
+        lastModifiedByUid: params.operatorUid,
+        ...nextClientRevFields(rental),
+      }));
     });
-
-    const nowIso = new Date().toISOString();
-    const historyEntry: GroupRentalHistoryEntry = {
-      id: `hist-gr-link-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      timestamp: nowIso,
-      operator: params.operatorName,
-      operatorUid: params.operatorUid,
-      type: 'vinculo_bar',
-      description: params.comandaId
-        ? `Participante "${participant.name}" vinculado à ${comandaNumberDesc}`
-        : `Vínculo de comanda do bar removido de "${participant.name}"`,
-    };
-
-    transaction.set(rentalRef, sanitizeForFirestore({
-      ...rental,
-      participants: updatedParticipants,
-      history: [...(rental.history || []), historyEntry],
-      lastModifiedAt: nowIso,
-      lastModifiedByUid: params.operatorUid,
-    }));
-  });
+  } catch (err) {
+    throw new Error(
+      translateStaleClientError(err, {
+        hasRefunds: observedHasRefunds,
+        docClientRev: observedClientRev,
+        fallbackMessage: 'Falha ao vincular comanda de bar.',
+      })
+    );
+  }
 }
 
 /**
@@ -1097,20 +1354,26 @@ export async function atomicRegisterGroupPayment(params: {
     : null;
   const barReceiptRef = barReceiptId ? doc(db, 'receipts', barReceiptId) : null;
 
-  return runTransaction(db, async transaction => {
-    // 1. Todas as leituras acontecem antes de qualquer escrita (Firestore transaction requirement)
-    const [rentalSnap, rentalReceiptSnap, barSnap, barReceiptSnap] = await Promise.all([
-      transaction.get(rentalRef),
-      transaction.get(rentalReceiptRef),
-      barComandaRef ? transaction.get(barComandaRef) : Promise.resolve(null),
-      barReceiptRef ? transaction.get(barReceiptRef) : Promise.resolve(null),
-    ]);
+  let observedHasRefunds = false;
+  let observedClientRev: number | undefined;
 
-    if (!rentalSnap.exists()) {
-      throw new Error('Locação em grupo não encontrada no servidor.');
-    }
+  try {
+    return await runTransaction(db, async transaction => {
+      // 1. Todas as leituras acontecem antes de qualquer escrita (Firestore transaction requirement)
+      const [rentalSnap, rentalReceiptSnap, barSnap, barReceiptSnap] = await Promise.all([
+        transaction.get(rentalRef),
+        transaction.get(rentalReceiptRef),
+        barComandaRef ? transaction.get(barComandaRef) : Promise.resolve(null),
+        barReceiptRef ? transaction.get(barReceiptRef) : Promise.resolve(null),
+      ]);
 
-    const rental = rentalSnap.data() as GroupRental;
+      if (!rentalSnap.exists()) {
+        throw new Error('Locação em grupo não encontrada no servidor.');
+      }
+
+      const rental = rentalSnap.data() as GroupRental;
+      observedHasRefunds = Array.isArray(rental.refunds) && rental.refunds.length > 0;
+      observedClientRev = rental.clientRev;
 
     // Idempotência: verificar se este clientNonce já foi registrado
     const existingPayment = (rental.payments || []).find(
@@ -1187,6 +1450,12 @@ export async function atomicRegisterGroupPayment(params: {
       }
 
       const barComanda = barSnap.data() as Comanda;
+      if (Array.isArray(barComanda.refunds) && barComanda.refunds.length > 0) {
+        observedHasRefunds = true;
+      }
+      if (typeof barComanda.clientRev === 'number') {
+        observedClientRev = Math.max(observedClientRev || 0, barComanda.clientRev);
+      }
       if (barComanda.status !== 'aberta') {
         throw new Error(`A Comanda #${barComanda.number} do bar já foi encerrada.`);
       }
@@ -1237,6 +1506,7 @@ export async function atomicRegisterGroupPayment(params: {
         history: [...(barComanda.history || []), barHistory],
         lastModifiedAt: nowIso,
         lastModifiedByUid: params.operatorUid,
+        ...nextClientRevFields(barComanda),
       };
       if (newBarBalance !== 0 && 'closedAt' in barComandaToUpdate) {
         delete (barComandaToUpdate as any).closedAt;
@@ -1339,6 +1609,7 @@ export async function atomicRegisterGroupPayment(params: {
       ...(isRentalNowFullyPaid ? { closedAt: nowIso } : {}),
       lastModifiedAt: nowIso,
       lastModifiedByUid: params.operatorUid,
+      ...nextClientRevFields(rental),
     };
     if (!isRentalNowFullyPaid && 'closedAt' in updatedRental) {
       delete (updatedRental as any).closedAt;
@@ -1394,12 +1665,21 @@ export async function atomicRegisterGroupPayment(params: {
       transaction.set(barReceiptRef, sanitizeForFirestore(barReceiptDoc));
     }
 
-    return {
-      changeCents,
-      alreadyProcessed: false,
-      payment: newGroupPayment,
-    };
-  });
+      return {
+        changeCents,
+        alreadyProcessed: false,
+        payment: newGroupPayment,
+      };
+    });
+  } catch (err) {
+    throw new Error(
+      translateStaleClientError(err, {
+        hasRefunds: observedHasRefunds,
+        docClientRev: observedClientRev,
+        fallbackMessage: 'Falha ao processar recebimento da locação.',
+      })
+    );
+  }
 }
 
 /**
@@ -1414,45 +1694,151 @@ export async function atomicCloseGroupRental(params: {
 
   const rentalRef = doc(db, 'group_rentals', params.rentalId);
 
-  await runTransaction(db, async transaction => {
-    const snap = await transaction.get(rentalRef);
-    if (!snap.exists()) {
-      throw new Error('Locação em grupo não encontrada.');
-    }
+  let observedHasRefunds = false;
+  let observedClientRev: number | undefined;
 
-    const rental = snap.data() as GroupRental;
-    if (rental.status === 'quitada') {
-      return; // Já quitada
-    }
+  try {
+    await runTransaction(db, async transaction => {
+      const snap = await transaction.get(rentalRef);
+      if (!snap.exists()) {
+        throw new Error('Locação em grupo não encontrada.');
+      }
 
-    const { pendingBalanceCents } = calculateGroupRentalTotals(rental);
-    if (pendingBalanceCents > 0) {
-      throw new Error(
-        `Não é possível encerrar uma locação com saldo pendente de R$ ${(pendingBalanceCents / 100).toFixed(
-          2
-        )}. Todos os participantes devem quitar suas partes primeiro.`
-      );
-    }
+      const rental = snap.data() as GroupRental;
+      observedHasRefunds = Array.isArray(rental.refunds) && rental.refunds.length > 0;
+      observedClientRev = rental.clientRev;
 
-    const nowIso = new Date().toISOString();
-    const historyEntry: GroupRentalHistoryEntry = {
-      id: `hist-gr-close-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      timestamp: nowIso,
-      operator: params.operatorName,
-      operatorUid: params.operatorUid,
-      type: 'encerramento',
-      description: `Locação encerrada e arquivada como quitada.`,
-    };
+      if (rental.status === 'quitada') {
+        return; // Já quitada
+      }
 
-    transaction.set(rentalRef, sanitizeForFirestore({
-      ...rental,
-      status: 'quitada',
-      closedAt: nowIso,
-      history: [...(rental.history || []), historyEntry],
-      lastModifiedAt: nowIso,
-      lastModifiedByUid: params.operatorUid,
-    }));
-  });
+      const { pendingBalanceCents } = calculateGroupRentalTotals(rental);
+      if (pendingBalanceCents > 0) {
+        throw new Error(
+          `Não é possível encerrar uma locação com saldo pendente de R$ ${(pendingBalanceCents / 100).toFixed(
+            2
+          )}. Todos os participantes devem quitar suas partes primeiro.`
+        );
+      }
+
+      const nowIso = new Date().toISOString();
+      const historyEntry: GroupRentalHistoryEntry = {
+        id: `hist-gr-close-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        timestamp: nowIso,
+        operator: params.operatorName,
+        operatorUid: params.operatorUid,
+        type: 'encerramento',
+        description: `Locação encerrada e arquivada como quitada.`,
+      };
+
+      transaction.set(rentalRef, sanitizeForFirestore({
+        ...rental,
+        status: 'quitada',
+        closedAt: nowIso,
+        history: [...(rental.history || []), historyEntry],
+        lastModifiedAt: nowIso,
+        lastModifiedByUid: params.operatorUid,
+        ...nextClientRevFields(rental),
+      }));
+    });
+  } catch (err) {
+    throw new Error(
+      translateStaleClientError(err, {
+        hasRefunds: observedHasRefunds,
+        docClientRev: observedClientRev,
+        fallbackMessage: 'Falha ao encerrar locação em grupo.',
+      })
+    );
+  }
+}
+
+/**
+ * Registro atômico de estorno de pagamento em locação em grupo (somente Administrador).
+ * - Estorna exclusivamente a parcela da quadra (nunca altera comanda de bar vinculada).
+ * - Bloqueia estorno em locação com status `cancelada`.
+ * - Atualiza `participants[].paidAmountCents` e `status`, reabre locação `quitada` -> `aberta`,
+ *   e grava lançamento novo em `receipts` com `kind: 'estorno'` e `paidAt: serverTimestamp()`.
+ */
+export async function atomicRefundGroupRentalPayment(params: {
+  rentalId: string;
+  sourcePaymentId: string;
+  allocations: { participantId: string; amountCents: number }[];
+  reason: string;
+  clientNonce: string;
+  adminUid: string;
+  adminName: string;
+}): Promise<{ alreadyProcessed: boolean; refund: GroupRentalRefund; reopened: boolean }> {
+  assertOnline('Registro de Estorno de Locação em Grupo');
+
+  const rentalRef = doc(db, 'group_rentals', params.rentalId);
+  const receiptId = buildDeterministicRefundReceiptId('locacao', params.rentalId, params.clientNonce);
+  const receiptRef = doc(db, 'receipts', receiptId);
+
+  let observedHasRefunds = false;
+  let observedClientRev: number | undefined;
+
+  try {
+    return await runTransaction(db, async transaction => {
+      const [snap, receiptSnap] = await Promise.all([
+        transaction.get(rentalRef),
+        transaction.get(receiptRef),
+      ]);
+
+      if (!snap.exists()) {
+        throw new Error('Locação em grupo não encontrada no servidor.');
+      }
+
+      const rental = snap.data() as GroupRental;
+      observedHasRefunds = Array.isArray(rental.refunds) && rental.refunds.length > 0;
+      observedClientRev = rental.clientRev;
+
+      const transition = buildGroupRentalRefundTransition({
+        rental,
+        sourcePaymentId: params.sourcePaymentId,
+        allocations: params.allocations,
+        reason: params.reason,
+        clientNonce: params.clientNonce,
+        adminUid: params.adminUid,
+        adminName: params.adminName,
+      });
+
+      if (!transition.ok) {
+        throw new Error(transition.error);
+      }
+
+      if (transition.idempotent) {
+        return {
+          alreadyProcessed: true,
+          refund: transition.refund,
+          reopened: false,
+        };
+      }
+
+      transaction.set(rentalRef, sanitizeForFirestore(transition.updatedRental));
+
+      if (!receiptSnap.exists()) {
+        const receiptDoc: ReceiptDocument = {
+          ...transition.receiptPayload,
+          paidAt: serverTimestamp(),
+        };
+        transaction.set(receiptRef, sanitizeForFirestore(receiptDoc));
+      }
+
+      return {
+        alreadyProcessed: false,
+        refund: transition.refund,
+        reopened: transition.reopened,
+      };
+    });
+  } catch (err) {
+    throw new Error(
+      translateStaleClientError(err, {
+        hasRefunds: observedHasRefunds,
+        docClientRev: observedClientRev,
+        fallbackMessage: 'Falha ao registrar estorno da locação no servidor.',
+      })
+    );
+  }
 }
 
 /**

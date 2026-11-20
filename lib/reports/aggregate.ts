@@ -7,6 +7,9 @@ export type GroupingGranularity = 'dia' | 'semana' | 'mes';
 
 export interface ReceiptTotals {
   totalCents: number;
+  grossReceivedCents: number;
+  refundedCents: number;
+  refundsCount: number;
   comandasCents: number;
   locacoesCents: number;
   byMethodCents: Record<PaymentMethod, number>;
@@ -69,6 +72,9 @@ const MONTH_NAMES_PT = [
 function createEmptyTotals(): ReceiptTotals {
   return {
     totalCents: 0,
+    grossReceivedCents: 0,
+    refundedCents: 0,
+    refundsCount: 0,
     comandasCents: 0,
     locacoesCents: 0,
     byMethodCents: {
@@ -84,8 +90,15 @@ function createEmptyTotals(): ReceiptTotals {
 }
 
 function addLineToTotals(target: ReceiptTotals, line: ReceiptLine) {
-  const signedAmount = line.kind === 'estorno' ? -line.amountCents : line.amountCents;
+  const isRefund = line.kind === 'estorno';
+  const signedAmount = isRefund ? -line.amountCents : line.amountCents;
   target.totalCents += signedAmount;
+  if (isRefund) {
+    target.refundedCents += line.amountCents;
+    target.refundsCount += 1;
+  } else {
+    target.grossReceivedCents += line.amountCents;
+  }
   target.count += 1;
   if (line.origin === 'comanda') {
     target.comandasCents += signedAmount;
@@ -99,6 +112,9 @@ function addLineToTotals(target: ReceiptTotals, line: ReceiptLine) {
 
 function mergeTotals(target: ReceiptTotals, source: ReceiptTotals) {
   target.totalCents += source.totalCents;
+  target.grossReceivedCents += source.grossReceivedCents;
+  target.refundedCents += source.refundedCents;
+  target.refundsCount += source.refundsCount;
   target.comandasCents += source.comandasCents;
   target.locacoesCents += source.locacoesCents;
   target.byMethodCents.pix += source.byMethodCents.pix;
@@ -266,7 +282,7 @@ export function aggregateReceipts(
 ): AggregatedReceiptsResult {
   const jointPaymentCounts: Record<string, number> = {};
   for (const line of allLines) {
-    if (line.jointPaymentKey) {
+    if (line.kind !== 'estorno' && line.jointPaymentKey) {
       jointPaymentCounts[line.jointPaymentKey] = (jointPaymentCounts[line.jointPaymentKey] || 0) + 1;
     }
   }

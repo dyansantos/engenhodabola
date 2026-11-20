@@ -26,6 +26,9 @@ export function StaffManagementModal({ isOpen, onClose }: StaffManagementModalPr
   const {
     currentStaff,
     staffList,
+    staffLoaded,
+    staffSyncError,
+    refreshStaffList,
     addNewStaff,
     toggleStaff,
     changeRole,
@@ -270,7 +273,25 @@ export function StaffManagementModal({ isOpen, onClose }: StaffManagementModalPr
 
           {/* Lista de membros */}
           <div className="divide-y divide-slate-100 border border-slate-200 rounded-xl overflow-hidden bg-white">
-            {staffList.length === 0 ? (
+            {staffSyncError ? (
+              <div className="p-5 bg-red-50 text-xs text-red-900 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
+                  <span>Erro ao consultar equipe: {staffSyncError}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void refreshStaffList()}
+                  className="shrink-0 rounded-lg bg-red-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-800"
+                >
+                  Tentar novamente
+                </button>
+              </div>
+            ) : !staffLoaded ? (
+              <div className="p-6 text-center text-xs text-slate-500">
+                Carregando…
+              </div>
+            ) : staffList.length === 0 ? (
               <div className="p-6 text-center text-xs text-slate-500">
                 Nenhum funcionário cadastrado na base remota ainda.
               </div>

@@ -25,13 +25,30 @@ export function ReceiptsBarChart({
     );
   }
 
-  const maxTotalCents = buckets.reduce((max, b) => Math.max(max, b.totalCents), 0);
-  const safeMax = maxTotalCents > 0 ? maxTotalCents : 10000; // R$ 100,00 de escala base quando zerado
+  const maxPosCents = buckets.reduce(
+    (max, b) => Math.max(max, Math.max(0, b.totalCents)),
+    0
+  );
+  const maxNegCents = buckets.reduce(
+    (max, b) => Math.max(max, b.totalCents < 0 ? -b.totalCents : 0),
+    0
+  );
+  const hasNegativeDays = maxNegCents > 0;
+  const totalSpanCents =
+    maxPosCents + maxNegCents > 0 ? maxPosCents + maxNegCents : 10000;
 
   const chartHeight = 190;
   const topPad = 14;
   const bottomPad = 28;
   const usableHeight = chartHeight - topPad - bottomPad;
+
+  const positiveAreaHeight = hasNegativeDays
+    ? maxPosCents === 0
+      ? Math.round(usableHeight * 0.15)
+      : Math.max(18, Math.round((maxPosCents / totalSpanCents) * usableHeight))
+    : usableHeight;
+  const negativeAreaHeight = Math.max(0, usableHeight - positiveAreaHeight);
+  const zeroY = topPad + positiveAreaHeight;
 
   // Largura adaptativa para muitos dias (ex: mês completo) sem comprimir demais os rótulos
   const barSlotWidth = buckets.length > 20 ? 28 : buckets.length > 10 ? 44 : 68;
@@ -53,6 +70,12 @@ export function ReceiptsBarChart({
             <span className="h-2.5 w-2.5 rounded-xs bg-sky-600 inline-block" />
             <span className="font-medium text-slate-700">Locações de quadras</span>
           </div>
+          {hasNegativeDays && (
+            <div className="flex items-center gap-1.5">
+              <span className="h-2.5 w-2.5 rounded-xs bg-rose-600 inline-block" />
+              <span className="font-medium text-slate-700">Saldo líquido negativo (estornos)</span>
+            </div>
+          )}
           <span className="text-[11px] text-slate-400">
             Clique em uma barra para conferir os lançamentos
           </span>
@@ -66,7 +89,7 @@ export function ReceiptsBarChart({
               <span className="text-slate-400">·</span>
               <span>Locações {formatCents(hoveredBucket.locacoesCents)}</span>
               <span className="text-slate-400">·</span>
-              <strong className="text-emerald-900">
+              <strong className={hoveredBucket.totalCents < 0 ? 'text-rose-700' : 'text-emerald-900'}>
                 Total {formatCents(hoveredBucket.totalCents)}
               </strong>
             </span>
@@ -90,41 +113,79 @@ export function ReceiptsBarChart({
           role="img"
           aria-label="Gráfico de barras de recebimentos por período"
         >
-          {/* Linhas de referência horizontais (0%, 50%, 100%) */}
-          {[0, 0.5, 1].map(ratio => {
-            const y = topPad + usableHeight * (1 - ratio);
-            return (
-              <line
-                key={ratio}
-                x1={8}
-                y1={y}
-                x2={minSvgWidth - 8}
-                y2={y}
-                stroke={ratio === 0 ? '#cbd5e1' : '#e2e8f0'}
-                strokeDasharray={ratio === 0 ? undefined : '3 3'}
-                strokeWidth={1}
-              />
-            );
-          })}
+          {/* Linhas de referência horizontais */}
+          <line
+            x1={8}
+            y1={topPad}
+            x2={minSvgWidth - 8}
+            y2={topPad}
+            stroke="#e2e8f0"
+            strokeDasharray="3 3"
+            strokeWidth={1}
+          />
+          {!hasNegativeDays && (
+            <line
+              x1={8}
+              y1={topPad + positiveAreaHeight * 0.5}
+              x2={minSvgWidth - 8}
+              y2={topPad + positiveAreaHeight * 0.5}
+              stroke="#e2e8f0"
+              strokeDasharray="3 3"
+              strokeWidth={1}
+            />
+          )}
+          <line
+            x1={8}
+            y1={zeroY}
+            x2={minSvgWidth - 8}
+            y2={zeroY}
+            stroke="#cbd5e1"
+            strokeWidth={1}
+          />
+          {hasNegativeDays && (
+            <line
+              x1={8}
+              y1={topPad + usableHeight}
+              x2={minSvgWidth - 8}
+              y2={topPad + usableHeight}
+              stroke="#fecdd3"
+              strokeDasharray="3 3"
+              strokeWidth={1}
+            />
+          )}
 
           {buckets.map((bucket, idx) => {
             const slotCenter = 12 + idx * barSlotWidth + barSlotWidth / 2;
             const barX = slotCenter - barWidth / 2;
-
-            const totalHeight =
-              maxTotalCents > 0
-                ? Math.round((bucket.totalCents / safeMax) * usableHeight)
-                : 0;
-            const comandasHeight =
-              maxTotalCents > 0
-                ? Math.round((bucket.comandasCents / safeMax) * usableHeight)
-                : 0;
-            const locacoesHeight = Math.max(0, totalHeight - comandasHeight);
-
-            const baseY = topPad + usableHeight;
-            const comandasY = baseY - comandasHeight;
-            const locacoesY = comandasY - locacoesHeight;
             const isHovered = hoveredKey === bucket.key;
+
+            let comandasHeight = 0;
+            let locacoesHeight = 0;
+            let negativeHeight = 0;
+
+            if (bucket.totalCents > 0 && maxPosCents > 0) {
+              const totalHeight = Math.max(
+                2,
+                Math.round((bucket.totalCents / maxPosCents) * positiveAreaHeight)
+              );
+              const posComandas = Math.max(0, bucket.comandasCents);
+              const posLocacoes = Math.max(0, bucket.locacoesCents);
+              const posSum = posComandas + posLocacoes;
+              if (posSum > 0) {
+                comandasHeight = Math.round((posComandas / posSum) * totalHeight);
+                locacoesHeight = Math.max(0, totalHeight - comandasHeight);
+              } else {
+                comandasHeight = totalHeight;
+              }
+            } else if (bucket.totalCents < 0 && maxNegCents > 0) {
+              negativeHeight = Math.max(
+                2,
+                Math.round((-bucket.totalCents / maxNegCents) * negativeAreaHeight)
+              );
+            }
+
+            const comandasY = zeroY - comandasHeight;
+            const locacoesY = comandasY - locacoesHeight;
 
             return (
               <g
@@ -157,7 +218,7 @@ export function ReceiptsBarChart({
                 {bucket.totalCents === 0 && (
                   <rect
                     x={barX}
-                    y={baseY - 2}
+                    y={zeroY - 2}
                     width={barWidth}
                     height={2}
                     fill="#cbd5e1"
@@ -185,6 +246,18 @@ export function ReceiptsBarChart({
                     width={barWidth}
                     height={locacoesHeight}
                     fill={isHovered ? '#0369a1' : '#0284c7'}
+                    rx={4}
+                  />
+                )}
+
+                {/* Barra negativa (dia cujo saldo líquido ficou negativo após estornos) */}
+                {negativeHeight > 0 && (
+                  <rect
+                    x={barX}
+                    y={zeroY}
+                    width={barWidth}
+                    height={negativeHeight}
+                    fill={isHovered ? '#be123c' : '#e11d48'}
                     rx={4}
                   />
                 )}

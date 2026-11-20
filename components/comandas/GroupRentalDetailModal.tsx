@@ -3,18 +3,20 @@
 import React, { useState, useMemo } from 'react';
 import { useComandas } from '@/context/ComandasContext';
 import {
-  GroupRental,
   GroupParticipant,
+  GroupRentalPayment,
   PaymentMethod,
-  ParticipantStatus,
 } from '@/lib/types';
 import {
   formatCents,
   formatDateTime,
   formatDate,
   parseMonetaryInputToCents,
+  calculateComandaTotals,
 } from '@/lib/formatters';
 import { calculateGroupRentalTotals } from '@/lib/firestore-transactions';
+import { getGroupPaymentRefundSummary } from '@/lib/refunds';
+import { RefundPaymentModal } from './RefundPaymentModal';
 import {
   X,
   Users,
@@ -37,6 +39,7 @@ import {
   ArrowRight,
   ShieldCheck,
   Coffee,
+  RotateCcw,
 } from 'lucide-react';
 
 interface GroupRentalDetailModalProps {
@@ -48,15 +51,19 @@ export function GroupRentalDetailModal({ rentalId, onClose }: GroupRentalDetailM
   const {
     groupRentals,
     comandas,
+    currentStaff,
     updateParticipantName,
     adjustGroupDivision,
     linkBarComanda,
     registerGroupPayment,
+    refundGroupRentalPayment,
     closeGroupRental,
     verifyGroupPaymentStatus,
+    setSelectedComandaId,
   } = useComandas();
 
   const rental = groupRentals.find(r => r.id === rentalId);
+  const isAdmin = currentStaff?.role === 'admin';
 
   // Filtros e busca de participantes
   const [searchQuery, setSearchQuery] = useState('');
@@ -97,6 +104,9 @@ export function GroupRentalDetailModal({ rentalId, onClose }: GroupRentalDetailM
 
   // Aba ativa de exibição
   const [activeTab, setActiveTab] = useState<'participantes' | 'historico'>('participantes');
+
+  // Pagamento selecionado para estorno (somente admin)
+  const [refundingPayment, setRefundingPayment] = useState<GroupRentalPayment | null>(null);
 
   // Estados de submissão e erro
   const [actionError, setActionError] = useState<string | null>(null);
@@ -198,8 +208,7 @@ export function GroupRentalDetailModal({ rentalId, onClose }: GroupRentalDetailM
     if (includeBarInQuickPay && quickPayParticipant.linkedComandaId) {
       const linkedCmd = comandas.find(c => c.id === quickPayParticipant.linkedComandaId);
       if (linkedCmd && linkedCmd.status === 'aberta') {
-        const barBalanceCents = linkedCmd.items.reduce((acc, it) => acc + it.priceCents * it.quantity, 0)
-          - linkedCmd.payments.reduce((acc, p) => acc + p.amountCents, 0);
+        const barBalanceCents = calculateComandaTotals(linkedCmd).balanceCents;
         if (barBalanceCents > 0) {
           linkedBarPaymentParam = {
             participantId: quickPayParticipant.id,
@@ -740,10 +749,9 @@ export function GroupRentalDetailModal({ rentalId, onClose }: GroupRentalDetailM
                           ? comandas.find(c => c.id === participant.linkedComandaId)
                           : null;
 
-                        // Saldo da comanda vinculada
+                        // Saldo da comanda vinculada (considera estornos registrados)
                         const linkedBarBalanceCents = linkedCmd
-                          ? linkedCmd.items.reduce((acc, it) => acc + it.priceCents * it.quantity, 0) -
-                            linkedCmd.payments.reduce((acc, p) => acc + p.amountCents, 0)
+                          ? calculateComandaTotals(linkedCmd).balanceCents
                           : 0;
 
                         return (
@@ -956,57 +964,121 @@ export function GroupRentalDetailModal({ rentalId, onClose }: GroupRentalDetailM
                   </p>
                 ) : (
                   <div className="divide-y divide-slate-100">
-                    {rental.payments.map((pay, idx) => (
-                      <div key={pay.id || idx} className="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-2">
-                            <span className="rounded bg-emerald-100 px-2 py-0.5 text-2xs font-bold text-emerald-900 uppercase">
-                              {pay.method}
-                            </span>
-                            <span className="text-sm font-bold text-slate-900">
-                              {formatCents(pay.amountCents)}
-                            </span>
-                            {pay.payerName && (
-                              <span className="text-xs text-slate-600">
-                                • Pago por <strong>{pay.payerName}</strong>
-                              </span>
-                            )}
-                          </div>
+                    {rental.payments.map((pay, idx) => {
+                      const refundSummary = getGroupPaymentRefundSummary(rental, pay.id);
+                      const refundedCents = refundSummary?.refundedCents ?? 0;
+                      const refundableCents = refundSummary?.refundableCents ?? 0;
+                      const paymentRefunds = refundSummary?.refunds ?? [];
+                      const canRefund =
+                        isAdmin &&
+                        rental.status !== 'cancelada' &&
+                        refundableCents > 0;
 
-                          {/* Detalhes de Alocação por Participante */}
-                          <div className="text-xs text-slate-600">
-                            Distribuído para:{' '}
-                            {pay.allocations?.map((a, i) => (
-                              <span key={a.participantId}>
-                                {i > 0 && ', '}
-                                <strong>{a.participantName}</strong> ({formatCents(a.amountCents)})
-                              </span>
-                            ))}
-                          </div>
+                      return (
+                        <div key={pay.id || idx} className="py-3 space-y-2.5">
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                            <div className="space-y-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="rounded bg-emerald-100 px-2 py-0.5 text-2xs font-bold text-emerald-900 uppercase">
+                                  {pay.method}
+                                </span>
+                                <span className="text-sm font-bold text-slate-900">
+                                  {formatCents(pay.amountCents)}
+                                </span>
+                                {pay.payerName && (
+                                  <span className="text-xs text-slate-600">
+                                    • Pago por <strong>{pay.payerName}</strong>
+                                  </span>
+                                )}
+                                {refundedCents > 0 && (
+                                  <span className="inline-flex items-center rounded-md border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-[10px] font-bold text-rose-800">
+                                    {refundableCents === 0
+                                      ? 'Estornado integralmente'
+                                      : `Estorno parcial (-${formatCents(refundedCents)})`}
+                                  </span>
+                                )}
+                              </div>
 
-                          {/* Se incluiu Bar */}
-                          {pay.linkedBarPayment && (
-                            <div className="text-2xs text-amber-800 font-semibold flex items-center gap-1">
-                              <Coffee className="h-3 w-3" />
-                              <span>
-                                Incluiu Bar (Comanda #{pay.linkedBarPayment.comandaNumber} - {formatCents(pay.linkedBarPayment.amountCents)})
-                              </span>
+                              {/* Detalhes de Alocação por Participante */}
+                              <div className="text-xs text-slate-600">
+                                Distribuído para:{' '}
+                                {pay.allocations?.map((a, i) => (
+                                  <span key={a.participantId}>
+                                    {i > 0 && ', '}
+                                    <strong>{a.participantName}</strong> ({formatCents(a.amountCents)})
+                                  </span>
+                                ))}
+                              </div>
+
+                              {/* Se incluiu Bar */}
+                              {pay.linkedBarPayment && (
+                                <div className="text-2xs text-amber-800 font-semibold flex items-center gap-1">
+                                  <Coffee className="h-3 w-3" />
+                                  <span>
+                                    Incluiu Bar (Comanda #{pay.linkedBarPayment.comandaNumber} - {formatCents(pay.linkedBarPayment.amountCents)})
+                                  </span>
+                                </div>
+                              )}
+
+                              {pay.changeCents && pay.changeCents > 0 && (
+                                <div className="text-2xs text-slate-500">
+                                  Troco devolvido: {formatCents(pay.changeCents)}
+                                </div>
+                              )}
                             </div>
-                          )}
 
-                          {pay.changeCents && pay.changeCents > 0 && (
-                            <div className="text-2xs text-slate-500">
-                              Troco devolvido: {formatCents(pay.changeCents)}
+                            <div className="flex flex-row sm:flex-col items-center sm:items-end justify-between gap-1.5 shrink-0">
+                              <div className="text-left sm:text-right text-2xs text-slate-400">
+                                <p>{formatDateTime(pay.timestamp)}</p>
+                                <p>Operador: {pay.operator}</p>
+                              </div>
+                              {canRefund && (
+                                <button
+                                  type="button"
+                                  onClick={() => setRefundingPayment(pay)}
+                                  className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1 text-[11px] font-semibold text-rose-800 hover:bg-rose-100 transition-colors"
+                                >
+                                  <RotateCcw className="h-3 w-3" />
+                                  <span>Registrar estorno</span>
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {paymentRefunds.length > 0 && (
+                            <div className="ml-2 pl-3 border-l-2 border-rose-200 space-y-1.5">
+                              {paymentRefunds.map(ref => (
+                                <div
+                                  key={ref.id}
+                                  className="rounded-lg border border-rose-100 bg-rose-50/70 px-3 py-2 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-1.5"
+                                >
+                                  <div className="space-y-0.5">
+                                    <p className="font-semibold text-rose-900">
+                                      Estorno registrado · {formatDateTime(ref.timestamp)}
+                                    </p>
+                                    <p className="text-[11px] text-rose-800">
+                                      Participantes:{' '}
+                                      {ref.allocations.map((a, i) => (
+                                        <span key={a.participantId}>
+                                          {i > 0 && ', '}
+                                          <strong>{a.participantName}</strong> ({formatCents(a.amountCents)})
+                                        </span>
+                                      ))}
+                                    </p>
+                                    <p className="text-[11px] text-rose-800">
+                                      Motivo: {ref.reason} · Admin: {ref.operator}
+                                    </p>
+                                  </div>
+                                  <span className="text-xs font-bold text-rose-800 tabular-nums shrink-0">
+                                    -{formatCents(ref.amountCents)}
+                                  </span>
+                                </div>
+                              ))}
                             </div>
                           )}
                         </div>
-
-                        <div className="text-right text-2xs text-slate-400">
-                          <p>{formatDateTime(pay.timestamp)}</p>
-                          <p>Operador: {pay.operator}</p>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -1150,8 +1222,7 @@ export function GroupRentalDetailModal({ rentalId, onClose }: GroupRentalDetailM
               {quickPayParticipant.linkedComandaId && (() => {
                 const linkedCmd = comandas.find(c => c.id === quickPayParticipant.linkedComandaId);
                 if (!linkedCmd || linkedCmd.status !== 'aberta') return null;
-                const barBal = linkedCmd.items.reduce((acc, it) => acc + it.priceCents * it.quantity, 0)
-                  - linkedCmd.payments.reduce((acc, p) => acc + p.amountCents, 0);
+                const barBal = calculateComandaTotals(linkedCmd).balanceCents;
                 if (barBal <= 0) return null;
 
                 const quadraCents = quickPayPartial
@@ -1213,8 +1284,7 @@ export function GroupRentalDetailModal({ rentalId, onClose }: GroupRentalDetailM
                     if (includeBarInQuickPay && quickPayParticipant.linkedComandaId) {
                       const linkedCmd = comandas.find(c => c.id === quickPayParticipant.linkedComandaId);
                       if (linkedCmd && linkedCmd.status === 'aberta') {
-                        barCents = linkedCmd.items.reduce((acc, it) => acc + it.priceCents * it.quantity, 0)
-                          - linkedCmd.payments.reduce((acc, p) => acc + p.amountCents, 0);
+                        barCents = calculateComandaTotals(linkedCmd).balanceCents;
                       }
                     }
                     const totalReq = quadraCents + barCents;
@@ -1603,9 +1673,7 @@ export function GroupRentalDetailModal({ rentalId, onClose }: GroupRentalDetailM
               ) : (
                 <div className="rounded-lg border border-slate-200 divide-y divide-slate-100 max-h-56 overflow-y-auto">
                   {openIndividualComandas.map(cmd => {
-                    const balance =
-                      cmd.items.reduce((acc, it) => acc + it.priceCents * it.quantity, 0) -
-                      cmd.payments.reduce((acc, p) => acc + p.amountCents, 0);
+                    const balance = calculateComandaTotals(cmd).balanceCents;
 
                     return (
                       <button
@@ -1650,6 +1718,29 @@ export function GroupRentalDetailModal({ rentalId, onClose }: GroupRentalDetailM
             </div>
           </div>
         </div>
+      )}
+      {refundingPayment && (
+        <RefundPaymentModal
+          mode="locacao"
+          rental={rental}
+          payment={refundingPayment}
+          jointShortcut={
+            refundingPayment.linkedBarPayment
+              ? {
+                  label: `Abrir Comanda #${refundingPayment.linkedBarPayment.comandaNumber}`,
+                  description: `Este recebimento incluiu a Comanda #${refundingPayment.linkedBarPayment.comandaNumber} do bar (${formatCents(refundingPayment.linkedBarPayment.amountCents)}). Este estorno altera somente a parcela da quadra; para estornar a parte do bar, abra a comanda.`,
+                  onOpen: () => {
+                    const targetId = refundingPayment.linkedBarPayment?.comandaId;
+                    setRefundingPayment(null);
+                    onClose();
+                    if (targetId) setSelectedComandaId(targetId);
+                  },
+                }
+              : undefined
+          }
+          onSubmit={params => refundGroupRentalPayment(rental.id, params)}
+          onClose={() => setRefundingPayment(null)}
+        />
       )}
     </div>
   );

@@ -62,6 +62,8 @@ export function AgendaView() {
     agendaFilterType,
     setAgendaFilterType,
     operatingHours,
+    operatingHoursSyncError,
+    appointmentsSyncError,
     setIsOperatingHoursModalOpen,
     openNewAppointmentWithSlot,
     currentStaff,
@@ -224,8 +226,37 @@ export function AgendaView() {
         </div>
       </div>
 
+      {/* Alertas de Erro de Sincronização da Agenda / Horário */}
+      {operatingHoursSyncError && (
+        <div className="rounded-2xl border border-red-200 bg-red-50 p-3.5 sm:p-4 flex items-start gap-2.5 text-xs text-red-900">
+          <AlertCircle className="h-5 w-5 text-red-600 shrink-0 mt-0.5" />
+          <div>
+            <span className="font-bold text-red-950 block text-xs sm:text-sm">
+              Erro ao sincronizar horário de funcionamento
+            </span>
+            <span className="text-red-800 text-[11px] sm:text-xs">
+              {operatingHoursSyncError}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {appointmentsSyncError && (
+        <div className="rounded-2xl border border-red-200 bg-red-50 p-3.5 sm:p-4 flex items-start gap-2.5 text-xs text-red-900">
+          <AlertCircle className="h-5 w-5 text-red-600 shrink-0 mt-0.5" />
+          <div>
+            <span className="font-bold text-red-950 block text-xs sm:text-sm">
+              Erro ao sincronizar agenda das quadras
+            </span>
+            <span className="text-red-800 text-[11px] sm:text-xs">
+              {appointmentsSyncError}
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Alerta de Horário de Funcionamento Não Configurado */}
-      {!operatingHours?.configured && (
+      {!operatingHoursSyncError && !operatingHours?.configured && (
         <div className="rounded-2xl border border-amber-300 bg-amber-50/90 p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
           <div className="flex items-start sm:items-center gap-2.5">
             <AlertCircle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5 sm:mt-0" />

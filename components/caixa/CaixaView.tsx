@@ -1,200 +1,320 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useComandas } from '@/context/ComandasContext';
 import { formatCents } from '@/lib/formatters';
-import { ArrowDownRight, ArrowUpRight, Info, Lock } from 'lucide-react';
+import { aggregateReceipts, AggregatedReceiptsResult } from '@/lib/reports/aggregate';
+import { ReceiptIssue, ReceiptLine } from '@/lib/reports/receipts';
+import { fetchReceiptsByDateRange } from '@/lib/reports/receipts-firestore';
+import {
+  AlertCircle,
+  AlertTriangle,
+  Banknote,
+  Info,
+  RefreshCw,
+  ShieldAlert,
+  Wallet,
+} from 'lucide-react';
 
-export function CaixaView() {
-  const { metrics } = useComandas();
+export interface CaixaAdminContentProps {
+  todayDateKey: string;
+  isLoading: boolean;
+  error: string | null;
+  summary: AggregatedReceiptsResult | null;
+  issues: ReceiptIssue[];
+  onRetry: () => void;
+}
 
-  // Valores de exemplo em centavos inteiros
-  const initialFloatCents = 35000; // R$ 350,00 (Fundo de troco fictício de abertura)
-  const withdrawalsCents = 8000; // R$ 80,00 (Exemplo de sangria para compra de gelo)
-  const [showClosingModal, setShowClosingModal] = useState(false);
-
-  // Dinheiro físico na gaveta = Fundo de troco + Recebimentos em Dinheiro de hoje - Sangrias
-  const cashInDrawerCents = initialFloatCents + metrics.todayReceiptsByMethodCents.dinheiro - withdrawalsCents;
-
+export function CaixaAdminContent({
+  todayDateKey,
+  isLoading,
+  error,
+  summary,
+  issues,
+  onRetry,
+}: CaixaAdminContentProps) {
   return (
     <div className="space-y-5">
-      {/* Aviso explicativo obrigatório */}
-      <div className="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-700">
-        <Info className="h-5 w-5 text-emerald-900 shrink-0 mt-0.5" />
-        <div>
-          <p className="font-semibold text-slate-900 text-sm">
-            Prévia do Módulo de Caixa — Reage às Comandas Locais Desta Demonstração
-          </p>
-          <p className="mt-0.5 text-slate-600 leading-relaxed">
-            Esta tela é uma <strong>prévia demonstrativa</strong> do módulo de caixa. Os valores de recebimentos reagem diretamente às comandas locais operadas neste dispositivo. O <strong>fundo de troco</strong> e as <strong>retiradas</strong> são identificados como exemplos ilustrativos para demonstrar a conferência da gaveta de dinheiro e <strong>não compõem receita nem vendas</strong>.
-          </p>
-        </div>
-      </div>
-
+      {/* Cabeçalho */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
-              Prévia do Caixa Operacional
-            </h1>
-            <span className="rounded-md bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600">
-              Prévia Demonstrativa
-            </span>
-          </div>
+          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
+            Caixa do Dia
+          </h1>
           <p className="text-xs sm:text-sm text-slate-600 mt-0.5">
-            Sessão operacional do dia atual · Operador de demonstração
+            Recebimentos reais registrados no livro oficial em {todayDateKey} (America/Sao_Paulo)
           </p>
         </div>
 
         <button
           type="button"
-          onClick={() => setShowClosingModal(true)}
-          className="flex h-10 items-center gap-1.5 rounded-lg bg-emerald-900 px-4 text-xs font-semibold text-white shadow-xs hover:bg-emerald-800"
+          onClick={onRetry}
+          disabled={isLoading}
+          className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 text-xs font-semibold text-slate-700 shadow-2xs hover:bg-slate-50 disabled:opacity-50"
         >
-          <Lock className="h-3.5 w-3.5" />
-          <span>Fechamento do Caixa (Simulação)</span>
+          <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+          <span>Atualizar</span>
         </button>
       </div>
 
-      {/* Cards de Resumo Segregando Receita de Dinheiro Físico */}
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs">
-          <span className="text-[11px] font-semibold text-slate-500 uppercase block">
-            Fundo de Troco (Exemplo)
-          </span>
-          <p className="mt-2 text-xl font-bold text-slate-900 tabular-nums">
-            {formatCents(initialFloatCents)}
+      {/* Aviso explícito sobre fechamento de caixa */}
+      <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-950">
+        <Info className="h-5 w-5 text-amber-700 shrink-0 mt-0.5" />
+        <div>
+          <p className="font-semibold text-sm">
+            Fechamento de caixa: ainda não integrado
           </p>
-          <p className="text-[11px] text-slate-400 mt-0.5">Abertura de gaveta (não é receita)</p>
-        </div>
-
-        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold text-slate-500 uppercase">
-              Recebimentos das Comandas Hoje
-            </span>
-            <ArrowDownRight className="h-4 w-4 text-emerald-800" />
-          </div>
-          <p className="mt-2 text-xl font-bold text-emerald-950 tabular-nums">
-            +{formatCents(metrics.todayReceiptsCents)}
+          <p className="mt-0.5 text-amber-900 leading-relaxed">
+            Fundo de troco, sangrias e conferência física de gaveta ainda não estão integrados e não entram nos valores exibidos abaixo. Os totais desta tela refletem exclusivamente os recebimentos reais gravados na coleção oficial de recebimentos do dia de hoje.
           </p>
-          <p className="text-[11px] text-slate-500 mt-0.5">Receita de vendas do dia (todas as formas)</p>
-        </div>
-
-        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold text-slate-500 uppercase">
-              Retiradas / Sangrias (Exemplo)
-            </span>
-            <ArrowUpRight className="h-4 w-4 text-red-600" />
-          </div>
-          <p className="mt-2 text-xl font-bold text-red-700 tabular-nums">
-            -{formatCents(withdrawalsCents)}
-          </p>
-          <p className="text-[11px] text-slate-400 mt-0.5">Ex: Compra de gelo (fictício)</p>
-        </div>
-
-        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs">
-          <span className="text-[11px] font-semibold text-slate-500 uppercase block">
-            Dinheiro Físico na Gaveta
-          </span>
-          <p className="mt-2 text-xl font-bold text-slate-900 tabular-nums">
-            {formatCents(cashInDrawerCents)}
-          </p>
-          <p className="text-[11px] text-slate-500 mt-0.5">Fundo + Dinheiro das comandas - Sangrias</p>
         </div>
       </div>
 
-      {/* Detalhamento por Forma de Pagamento */}
-      <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs">
-        <h2 className="text-base font-bold text-slate-900 mb-1">
-          Receitas das Comandas de Hoje por Forma de Pagamento
-        </h2>
-        <p className="text-xs text-slate-500 mb-3">
-          Somatório exclusivo das transações registradas na data de hoje (fuso America/Sao_Paulo)
-        </p>
-
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-          <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-            <span className="text-slate-500 font-medium">Pix</span>
-            <p className="mt-1 text-base font-bold text-slate-900 tabular-nums">
-              {formatCents(metrics.todayReceiptsByMethodCents.pix)}
-            </p>
-          </div>
-
-          <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-            <span className="text-slate-500 font-medium">Dinheiro em Espécie</span>
-            <p className="mt-1 text-base font-bold text-slate-900 tabular-nums">
-              {formatCents(metrics.todayReceiptsByMethodCents.dinheiro)}
-            </p>
-          </div>
-
-          <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-            <span className="text-slate-500 font-medium">Cartão de Débito</span>
-            <p className="mt-1 text-base font-bold text-slate-900 tabular-nums">
-              {formatCents(metrics.todayReceiptsByMethodCents.debito)}
-            </p>
-          </div>
-
-          <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-            <span className="text-slate-500 font-medium">Cartão de Crédito</span>
-            <p className="mt-1 text-base font-bold text-slate-900 tabular-nums">
-              {formatCents(metrics.todayReceiptsByMethodCents.credito)}
-            </p>
-          </div>
-        </div>
-      </div>
-
-      {/* Modal Demonstrativo de Fechamento de Caixa */}
-      {showClosingModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-xl">
-            <h3 className="text-base font-bold text-slate-900">
-              Conferência e Fechamento de Caixa (Prévia)
-            </h3>
-            <p className="mt-1 text-xs text-slate-500">
-              Resumo da sessão atual do operador
-            </p>
-
-            <div className="mt-4 space-y-2 rounded-lg bg-slate-50 p-3 text-xs border border-slate-200">
-              <div className="flex justify-between">
-                <span className="text-slate-600">Fundo de abertura (Exemplo):</span>
-                <span className="font-semibold">{formatCents(initialFloatCents)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-600">Receita total de hoje (Bar):</span>
-                <span className="font-semibold text-emerald-900">+{formatCents(metrics.todayReceiptsCents)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-600">Entradas físicas em dinheiro:</span>
-                <span className="font-semibold text-slate-800">+{formatCents(metrics.todayReceiptsByMethodCents.dinheiro)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-600">Total de sangrias (Exemplo):</span>
-                <span className="font-semibold text-red-700">-{formatCents(withdrawalsCents)}</span>
-              </div>
-              <div className="flex justify-between pt-2 border-t border-slate-200 font-bold text-sm">
-                <span>Dinheiro físico esperado na gaveta:</span>
-                <span className="text-slate-900">{formatCents(cashInDrawerCents)}</span>
-              </div>
-            </div>
-
-            <p className="mt-3 text-[11px] text-slate-500 leading-relaxed italic">
-              * O fechamento com conferência cega e impressão de relatório diário será implementado na próxima etapa do sistema.
-            </p>
-
-            <div className="mt-5 flex justify-end">
-              <button
-                type="button"
-                onClick={() => setShowClosingModal(false)}
-                className="h-10 rounded-lg bg-emerald-900 px-4 text-xs font-semibold text-white hover:bg-emerald-800"
-              >
-                Fechar janela
-              </button>
+      {/* Estado de erro */}
+      {error && (
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-900">
+          <div className="flex items-start gap-2.5">
+            <AlertCircle className="h-5 w-5 text-red-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-semibold text-sm text-red-950">
+                Erro ao consultar os recebimentos do dia
+              </p>
+              <p className="mt-0.5 text-red-800">{error}</p>
             </div>
           </div>
+          <button
+            type="button"
+            onClick={onRetry}
+            className="shrink-0 rounded-lg bg-red-700 px-3.5 py-2 text-xs font-semibold text-white hover:bg-red-800"
+          >
+            Tentar novamente
+          </button>
         </div>
       )}
+
+      {/* Estado de carregamento (sem exibir zero ou R$ 0,00) */}
+      {!error && (isLoading || !summary) && (
+        <div className="rounded-xl border border-slate-200 bg-white p-8 text-center shadow-2xs">
+          <RefreshCw className="mx-auto h-6 w-6 animate-spin text-emerald-900 mb-2" />
+          <p className="text-sm font-semibold text-slate-800">Carregando…</p>
+          <p className="mt-1 text-xs text-slate-500">
+            Consultando lançamentos oficiais de recebimentos de hoje
+          </p>
+        </div>
+      )}
+
+      {/* Dados reais carregados */}
+      {!error && !isLoading && summary && (
+        <>
+          {issues.length > 0 && (
+            <div className="flex items-start gap-2.5 rounded-xl border border-amber-300 bg-amber-50 p-4 text-xs text-amber-950">
+              <AlertTriangle className="h-4 w-4 text-amber-700 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold">
+                  Atenção: {issues.length}{' '}
+                  {issues.length === 1
+                    ? 'lançamento com inconsistência'
+                    : 'lançamentos com inconsistências'}{' '}
+                  no livro de recebimentos
+                </p>
+                <p className="mt-0.5 text-amber-900">
+                  Verifique os detalhes em Relatórios para conferência administrativa.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Cards principais: Dinheiro recebido hoje e Total recebido hoje */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="rounded-xl border border-emerald-200 bg-white p-5 shadow-2xs">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                  Recebido hoje em dinheiro (comandas e locações)
+                </span>
+                <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50 text-emerald-900">
+                  <Banknote className="h-4 w-4" />
+                </span>
+              </div>
+              <p className="mt-3 text-2xl font-bold text-emerald-950 tabular-nums">
+                {formatCents(summary.totals.byMethodCents.dinheiro)}
+              </p>
+              <p className="mt-1 text-[11px] text-slate-500">
+                Valor líquido efetivamente recebido em espécie no livro oficial (troco não entra como receita).
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                  Recebido hoje: comandas e locações
+                </span>
+                <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-700">
+                  <Wallet className="h-4 w-4" />
+                </span>
+              </div>
+              <p className="mt-3 text-2xl font-bold text-slate-900 tabular-nums">
+                {formatCents(summary.totals.totalCents)}
+              </p>
+              <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-slate-500">
+                <span>
+                  Comandas (Bar): {formatCents(summary.totals.comandasCents)}
+                </span>
+                <span>·</span>
+                <span>
+                  Locações em grupo: {formatCents(summary.totals.locacoesCents)}
+                </span>
+                <span>·</span>
+                <span>
+                  {summary.totals.count}{' '}
+                  {summary.totals.count === 1 ? 'lançamento' : 'lançamentos'}
+                </span>
+              </div>
+              {summary.totals.refundedCents > 0 && (
+                <p className="mt-1.5 text-[11px] font-semibold text-rose-700 tabular-nums">
+                  Inclui {summary.totals.refundsCount}{' '}
+                  {summary.totals.refundsCount === 1 ? 'estorno' : 'estornos'} de -
+                  {formatCents(summary.totals.refundedCents)} hoje (bruto{' '}
+                  {formatCents(summary.totals.grossReceivedCents)})
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* Detalhamento por Forma de Pagamento */}
+          <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs">
+            <h2 className="text-base font-bold text-slate-900 mb-1">
+              Recebido hoje por forma de pagamento (comandas e locações)
+            </h2>
+            <p className="text-xs text-slate-500 mb-3">
+              Somatório exclusivo dos lançamentos oficiais da data de hoje em America/Sao_Paulo
+            </p>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <span className="text-slate-500 font-medium">Pix</span>
+                <p className="mt-1 text-base font-bold text-slate-900 tabular-nums">
+                  {formatCents(summary.totals.byMethodCents.pix)}
+                </p>
+              </div>
+
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <span className="text-slate-500 font-medium">Dinheiro em Espécie</span>
+                <p className="mt-1 text-base font-bold text-slate-900 tabular-nums">
+                  {formatCents(summary.totals.byMethodCents.dinheiro)}
+                </p>
+              </div>
+
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <span className="text-slate-500 font-medium">Cartão de Débito</span>
+                <p className="mt-1 text-base font-bold text-slate-900 tabular-nums">
+                  {formatCents(summary.totals.byMethodCents.debito)}
+                </p>
+              </div>
+
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <span className="text-slate-500 font-medium">Cartão de Crédito</span>
+                <p className="mt-1 text-base font-bold text-slate-900 tabular-nums">
+                  {formatCents(summary.totals.byMethodCents.credito)}
+                </p>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
     </div>
+  );
+}
+
+export function CaixaView() {
+  const { currentStaff, setActiveModule, currentSaoPauloDay } = useComandas();
+  const isAdmin = currentStaff?.role === 'admin';
+
+  const [reloadTick, setReloadTick] = useState(0);
+  const [fetched, setFetched] = useState<{
+    key: string;
+    lines: ReceiptLine[];
+    issues: ReceiptIssue[];
+    error: string | null;
+  } | null>(null);
+
+  const queryKey = `${currentSaoPauloDay}|${reloadTick}`;
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    let cancelled = false;
+
+    fetchReceiptsByDateRange(currentSaoPauloDay, currentSaoPauloDay)
+      .then(result => {
+        if (cancelled) return;
+        setFetched({
+          key: queryKey,
+          lines: result.lines,
+          issues: result.issues,
+          error: null,
+        });
+      })
+      .catch(err => {
+        if (cancelled) return;
+        const message =
+          err instanceof Error
+            ? err.message
+            : 'Falha desconhecida ao consultar o livro de recebimentos.';
+        setFetched({
+          key: queryKey,
+          lines: [],
+          issues: [],
+          error: message,
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdmin, currentSaoPauloDay, queryKey]);
+
+  const isLoading = !fetched || fetched.key !== queryKey;
+  const error = !isLoading ? fetched.error : null;
+
+  const summary = useMemo(() => {
+    if (isLoading || error) return null;
+    return aggregateReceipts(fetched.lines, currentSaoPauloDay, currentSaoPauloDay);
+  }, [isLoading, error, fetched, currentSaoPauloDay]);
+
+  if (!isAdmin) {
+    return (
+      <div className="flex flex-col items-center justify-center py-16 px-4">
+        <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm space-y-4">
+          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-amber-50 text-amber-800">
+            <ShieldAlert className="h-6 w-6" />
+          </div>
+          <div>
+            <h1 className="text-lg font-bold text-slate-900">
+              Acesso Restrito ao Administrador
+            </h1>
+            <p className="mt-1.5 text-xs text-slate-600 leading-relaxed">
+              O módulo de Caixa está disponível apenas para usuários com perfil de Administrador.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setActiveModule('inicio')}
+            className="inline-flex h-10 items-center justify-center rounded-lg bg-emerald-900 px-4 text-xs font-semibold text-white hover:bg-emerald-800"
+          >
+            Voltar ao Início
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <CaixaAdminContent
+      todayDateKey={currentSaoPauloDay}
+      isLoading={isLoading}
+      error={error}
+      summary={summary}
+      issues={!isLoading && !error ? fetched.issues : []}
+      onRetry={() => setReloadTick(prev => prev + 1)}
+    />
   );
 }

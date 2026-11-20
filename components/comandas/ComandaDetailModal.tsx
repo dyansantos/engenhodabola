@@ -2,16 +2,18 @@
 
 import React, { useState } from 'react';
 import { useComandas } from '@/context/ComandasContext';
-import { Comanda, ComandaItem } from '@/lib/types';
+import { ComandaItem, PaymentRecord } from '@/lib/types';
 import {
   formatCents,
   formatDateTime,
   calculateComandaTotals,
 } from '@/lib/formatters';
+import { getComandaPaymentRefundSummary } from '@/lib/refunds';
 import { AddItemsModal } from './AddItemsModal';
 import { AdjustOrRemoveItemModal } from './AdjustOrRemoveItemModal';
 import { TransferItemsModal } from './TransferItemsModal';
 import { PaymentModal } from './PaymentModal';
+import { RefundPaymentModal } from './RefundPaymentModal';
 import {
   X,
   Plus,
@@ -26,6 +28,7 @@ import {
   History,
   AlertCircle,
   FileCheck,
+  RotateCcw,
 } from 'lucide-react';
 
 interface ComandaDetailModalProps {
@@ -34,13 +37,22 @@ interface ComandaDetailModalProps {
 }
 
 export function ComandaDetailModal({ comandaId, onClose }: ComandaDetailModalProps) {
-  const { comandas, closeComanda } = useComandas();
+  const {
+    comandas,
+    groupRentals,
+    currentStaff,
+    closeComanda,
+    refundComandaPayment,
+    setSelectedGroupRentalId,
+  } = useComandas();
 
   const comanda = comandas.find(c => c.id === comandaId);
+  const isAdmin = currentStaff?.role === 'admin';
 
   const [isAddItemsOpen, setIsAddItemsOpen] = useState(false);
   const [isTransferOpen, setIsTransferOpen] = useState(false);
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
+  const [refundingPayment, setRefundingPayment] = useState<PaymentRecord | null>(null);
   const [editingItem, setEditingItem] = useState<ComandaItem | null>(null);
   const [activeTab, setActiveTab] = useState<'consumo' | 'pagamentos' | 'historico'>('consumo');
   const [closeError, setCloseError] = useState<string | null>(null);
@@ -48,7 +60,13 @@ export function ComandaDetailModal({ comandaId, onClose }: ComandaDetailModalPro
 
   if (!comanda) return null;
 
-  const { totalConsumedCents, totalPaidCents, balanceCents } = calculateComandaTotals(comanda);
+  const {
+    totalConsumedCents,
+    totalPaidCents,
+    totalPaidGrossCents,
+    totalRefundedCents,
+    balanceCents,
+  } = calculateComandaTotals(comanda);
 
   // Status visual
   let statusBadge = {
@@ -193,6 +211,11 @@ export function ComandaDetailModal({ comandaId, onClose }: ComandaDetailModalPro
               <p className="text-base sm:text-lg font-bold text-slate-900 tabular-nums">
                 {formatCents(totalPaidCents)}
               </p>
+              {totalRefundedCents > 0 && (
+                <p className="text-[10px] text-rose-700 font-medium tabular-nums mt-0.5">
+                  Bruto {formatCents(totalPaidGrossCents)} · Estornos -{formatCents(totalRefundedCents)}
+                </p>
+              )}
             </div>
             <div className="p-3">
               <span className="text-[11px] font-medium text-slate-500 uppercase">
@@ -394,41 +417,87 @@ export function ComandaDetailModal({ comandaId, onClose }: ComandaDetailModalPro
                           : typeof pay.change === 'number'
                           ? Math.round(pay.change * 100)
                           : undefined;
+                      const refundSummary = getComandaPaymentRefundSummary(comanda, pay.id);
+                      const refundedCents = refundSummary?.refundedCents ?? 0;
+                      const refundableCents = refundSummary?.refundableCents ?? 0;
+                      const paymentRefunds = refundSummary?.refunds ?? [];
+                      const canRefund = isAdmin && refundableCents > 0;
 
                       return (
-                        <div
-                          key={pay.id}
-                          className="flex items-center justify-between p-3.5"
-                        >
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs font-bold uppercase text-slate-800">
-                                {pay.method === 'dinheiro'
-                                  ? 'Dinheiro'
-                                  : pay.method === 'pix'
-                                  ? 'Pix'
-                                  : pay.method === 'debito'
-                                  ? 'Cartão de Débito'
-                                  : 'Cartão de Crédito'}
-                              </span>
-                              <span className="text-xs text-slate-400">·</span>
-                              <span className="text-xs text-slate-500">
-                                {formatDateTime(pay.timestamp)}
-                              </span>
-                            </div>
-                            <p className="text-xs text-slate-500 mt-0.5">
-                              Recebido por: {pay.operator}
-                              {payTenderedCents && payTenderedCents > payAmountCents && (
-                                <span>
-                                  {' '}(Entregue: {formatCents(payTenderedCents)} | Troco: {formatCents(payChangeCents || 0)})
+                        <div key={pay.id} className="p-3.5 space-y-2.5">
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                            <div>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-xs font-bold uppercase text-slate-800">
+                                  {pay.method === 'dinheiro'
+                                    ? 'Dinheiro'
+                                    : pay.method === 'pix'
+                                    ? 'Pix'
+                                    : pay.method === 'debito'
+                                    ? 'Cartão de Débito'
+                                    : 'Cartão de Crédito'}
                                 </span>
+                                <span className="text-xs text-slate-400">·</span>
+                                <span className="text-xs text-slate-500">
+                                  {formatDateTime(pay.timestamp)}
+                                </span>
+                                {refundedCents > 0 && (
+                                  <span className="inline-flex items-center rounded-md border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-[10px] font-bold text-rose-800">
+                                    {refundableCents === 0
+                                      ? 'Estornado integralmente'
+                                      : `Estorno parcial (-${formatCents(refundedCents)})`}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-xs text-slate-500 mt-0.5">
+                                Recebido por: {pay.operator}
+                                {payTenderedCents && payTenderedCents > payAmountCents && (
+                                  <span>
+                                    {' '}(Entregue: {formatCents(payTenderedCents)} | Troco: {formatCents(payChangeCents || 0)})
+                                  </span>
+                                )}
+                              </p>
+                            </div>
+
+                            <div className="flex items-center justify-between sm:justify-end gap-2.5 shrink-0">
+                              <span className="text-sm font-bold text-emerald-900 tabular-nums">
+                                +{formatCents(payAmountCents)}
+                              </span>
+                              {canRefund && (
+                                <button
+                                  type="button"
+                                  onClick={() => setRefundingPayment(pay)}
+                                  className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] font-semibold text-rose-800 hover:bg-rose-100 transition-colors"
+                                >
+                                  <RotateCcw className="h-3 w-3" />
+                                  <span>Registrar estorno</span>
+                                </button>
                               )}
-                            </p>
+                            </div>
                           </div>
 
-                          <span className="text-sm font-bold text-emerald-900 tabular-nums">
-                            +{formatCents(payAmountCents)}
-                          </span>
+                          {paymentRefunds.length > 0 && (
+                            <div className="ml-2 pl-3 border-l-2 border-rose-200 space-y-1.5">
+                              {paymentRefunds.map(ref => (
+                                <div
+                                  key={ref.id}
+                                  className="rounded-lg border border-rose-100 bg-rose-50/70 px-3 py-2 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-1.5"
+                                >
+                                  <div>
+                                    <p className="font-semibold text-rose-900">
+                                      Estorno registrado · {formatDateTime(ref.timestamp)}
+                                    </p>
+                                    <p className="text-[11px] text-rose-800">
+                                      Motivo: {ref.reason} · Admin: {ref.operator}
+                                    </p>
+                                  </div>
+                                  <span className="text-xs font-bold text-rose-800 tabular-nums shrink-0">
+                                    -{formatCents(ref.amountCents)}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -553,6 +622,55 @@ export function ComandaDetailModal({ comandaId, onClose }: ComandaDetailModalPro
           onClose={() => setIsPaymentOpen(false)}
         />
       )}
+
+      {refundingPayment && (() => {
+        const baseNonce = refundingPayment.clientNonce?.endsWith('_bar')
+          ? refundingPayment.clientNonce.slice(0, -4)
+          : undefined;
+        const linkedRental = baseNonce
+          ? groupRentals.find(r =>
+              (r.payments || []).some(
+                gp =>
+                  gp.clientNonce === baseNonce ||
+                  (gp.linkedBarPayment?.comandaId === comanda.id &&
+                    gp.clientNonce === baseNonce)
+              )
+            )
+          : undefined;
+
+        const jointShortcut = linkedRental
+          ? {
+              label: `Abrir Locação #${linkedRental.number}`,
+              description: `Este pagamento foi recebido em conjunto com a Locação #${linkedRental.number} (${linkedRental.space}). Este estorno altera somente a parcela do bar; para estornar a parte da quadra, abra a locação.`,
+              onOpen: () => {
+                setRefundingPayment(null);
+                onClose();
+                setSelectedGroupRentalId(linkedRental.id);
+              },
+            }
+          : baseNonce
+          ? {
+              label: 'Ver locações em grupo',
+              description:
+                'Este pagamento foi recebido em conjunto com uma locação de quadra. Este estorno altera somente a parcela do bar; para estornar a parte da quadra, abra a locação correspondente.',
+              onOpen: () => {
+                setRefundingPayment(null);
+                onClose();
+              },
+            }
+          : undefined;
+
+        return (
+          <RefundPaymentModal
+            mode="comanda"
+            comanda={comanda}
+            payment={refundingPayment}
+            jointShortcut={jointShortcut}
+            onSubmit={params => refundComandaPayment(comanda.id, params)}
+            onClose={() => setRefundingPayment(null)}
+          />
+        );
+      })()}
     </>
   );
 }

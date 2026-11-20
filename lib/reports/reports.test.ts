@@ -808,4 +808,88 @@ describe('Livro `receipts` (Fase 2) — IDs, Paginação, Mapeamento e Backfill 
     expect(secondPlan.toCreate).toHaveLength(0);
     expect(secondPlan.skippedExistingCount).toBe(3);
   });
+
+  it('Etapa 4.1: estorno após a meia-noite em São Paulo aparece negativo no dia do estorno (não no dia original) e CSV sai -60,00 sem apóstrofo enquanto texto livre segue protegido', () => {
+    const paidDay1 = {
+      toDate: () => new Date('2026-11-19T02:55:00.000Z'), // 18/11 23:55 SP
+    };
+    const refundedDay2 = {
+      toDate: () => new Date('2026-11-19T03:05:00.000Z'), // 19/11 00:05 SP
+    };
+
+    const { lines, issues } = mapReceiptDocsToLines([
+      {
+        id: 'rcpt_cmd_c1_p1',
+        data: {
+          id: 'rcpt_cmd_c1_p1',
+          origin: 'comanda',
+          refId: 'c1',
+          refNumber: 77,
+          refLabel: 'Mesa 07',
+          method: 'pix',
+          amountCents: 6000,
+          paidAt: paidDay1,
+          staffUid: 'op-1',
+          staffName: 'Maria',
+          sourcePaymentId: 'p1',
+          kind: 'recebimento',
+        },
+      },
+      {
+        id: 'rcpt_est_cmd_c1_r1',
+        data: {
+          id: 'rcpt_est_cmd_c1_r1',
+          origin: 'comanda',
+          refId: 'c1',
+          refNumber: 77,
+          refLabel: 'Mesa 07',
+          method: 'pix',
+          amountCents: 6000,
+          paidAt: refundedDay2,
+          staffUid: 'adm-1',
+          staffName: 'Cauê Admin',
+          sourcePaymentId: 'p1',
+          refundId: 'ref_r1',
+          reason: '=SUM(A1:A2) Estorno combinado',
+          kind: 'estorno',
+        },
+      },
+    ]);
+
+    expect(issues).toHaveLength(0);
+    expect(lines).toHaveLength(2);
+    expect(lines[0].dateKey).toBe('2026-11-18');
+    expect(lines[1].dateKey).toBe('2026-11-19');
+
+    // Dia 18: +60,00
+    const agg18 = aggregateReceipts(lines, '2026-11-18', '2026-11-18');
+    expect(agg18.totals.totalCents).toBe(6000);
+    expect(agg18.totals.refundedCents).toBe(0);
+
+    // Dia 19: -60,00
+    const agg19 = aggregateReceipts(lines, '2026-11-19', '2026-11-19');
+    expect(agg19.totals.totalCents).toBe(-6000);
+    expect(agg19.totals.grossReceivedCents).toBe(0);
+    expect(agg19.totals.refundedCents).toBe(6000);
+    expect(agg19.totals.refundsCount).toBe(1);
+    expect(agg19.totals.byMethodCents.pix).toBe(-6000);
+
+    // Período 18 a 19: líquido 0, bruto 6000, estornado 6000
+    const aggBoth = aggregateReceipts(lines, '2026-11-18', '2026-11-19');
+    expect(aggBoth.totals.totalCents).toBe(0);
+    expect(aggBoth.totals.grossReceivedCents).toBe(6000);
+    expect(aggBoth.totals.refundedCents).toBe(6000);
+
+    // CSV (Ajuste C): valores negativos saem como -60,00 (SEM apóstrofo), texto livre com = segue escapado
+    const csv = buildReceiptsCsv({
+      rangeLabel: '18/11 a 19/11/2026',
+      isOngoing: false,
+      grouping: 'dia',
+      aggregated: aggBoth,
+    });
+    expect(csv).toContain('19/11/2026;-60,00;0,00;-60,00;-60,00;0,00;0,00;0,00');
+    expect(csv).toContain('19/11/2026;00:05;Estorno;Comanda;#77;Mesa 07;Pix;-60,00;');
+    expect(csv).not.toContain("'-60,00");
+    expect(csv).toContain("'=SUM(A1:A2) Estorno combinado");
+  });
 });

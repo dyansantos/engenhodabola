@@ -142,10 +142,12 @@ export function formatDate(isoString: string): string {
 
 /**
  * Calcula totais da comanda usando estritamente centavos inteiros.
+ * Considera pagamentos brutos menos estornos registrados.
  */
 export function calculateComandaTotals(comanda: {
   items: { priceCents?: number; price?: number; quantity: number }[];
   payments: { amountCents?: number; amount?: number }[];
+  refunds?: { amountCents?: number }[];
 }) {
   const totalConsumedCents = comanda.items.reduce((acc, item) => {
     const unitCents =
@@ -158,7 +160,7 @@ export function calculateComandaTotals(comanda: {
     return acc + unitCents * qty;
   }, 0);
 
-  const totalPaidCents = comanda.payments.reduce((acc, p) => {
+  const totalPaidGrossCents = comanda.payments.reduce((acc, p) => {
     const payCents =
       typeof p.amountCents === 'number'
         ? p.amountCents
@@ -168,11 +170,24 @@ export function calculateComandaTotals(comanda: {
     return acc + payCents;
   }, 0);
 
+  const totalRefundedCents = Array.isArray(comanda.refunds)
+    ? comanda.refunds.reduce((acc, r) => {
+        const refCents =
+          typeof r?.amountCents === 'number' && Number.isInteger(r.amountCents) && r.amountCents > 0
+            ? r.amountCents
+            : 0;
+        return acc + refCents;
+      }, 0)
+    : 0;
+
+  const totalPaidCents = Math.max(0, totalPaidGrossCents - totalRefundedCents);
   const balanceCents = Math.max(0, totalConsumedCents - totalPaidCents);
 
   return {
     totalConsumedCents,
     totalPaidCents,
+    totalPaidGrossCents,
+    totalRefundedCents,
     balanceCents,
     // Compatibilidade legada em Reais:
     totalConsumed: totalConsumedCents / 100,

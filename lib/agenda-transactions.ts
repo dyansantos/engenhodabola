@@ -31,6 +31,7 @@ import {
   calculateEqualDivisionCents,
   getHighestExistingGroupRentalNumber,
 } from './firestore-transactions';
+import { nextClientRevFields } from './refunds';
 import {
   isEndTimeAfterStartTime,
   intervalsOverlap,
@@ -1175,6 +1176,7 @@ export async function atomicStartGroupRentalFromAppointment(params: {
         createdAt: nowIso,
         createdByUid: params.operatorUid,
         createdByName: params.operatorName,
+        ...nextClientRevFields(),
       };
 
       const updatedAppointment: Appointment = {

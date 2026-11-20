@@ -63,6 +63,7 @@ import {
   atomicTransferItems,
   atomicRegisterPayment,
   atomicCloseComanda,
+  atomicRefundComandaPayment,
   checkPaymentOperationStatus,
   atomicCreateGroupRental,
   atomicUpdateParticipantName,
@@ -70,6 +71,7 @@ import {
   atomicLinkBarComanda,
   atomicRegisterGroupPayment,
   atomicCloseGroupRental,
+  atomicRefundGroupRentalPayment,
   checkGroupPaymentOperationStatus,
   calculateGroupRentalTotals,
 } from '@/lib/firestore-transactions';
@@ -116,8 +118,16 @@ interface ComandasContextType {
   dismissStorageError: () => void;
   comandasLoaded: boolean;
   groupRentalsLoaded: boolean;
+  appointmentsLoaded: boolean;
+  productsLoaded: boolean;
+  staffLoaded: boolean;
   comandasSyncError: string | null;
   groupRentalsSyncError: string | null;
+  appointmentsSyncError: string | null;
+  productsSyncError: string | null;
+  operatingHoursSyncError: string | null;
+  staffSyncError: string | null;
+  currentSaoPauloDay: string;
 
   // Dados Locais e Recuperação Administrativa
   localBackupCount: number;
@@ -175,6 +185,15 @@ interface ComandasContextType {
     operationId: string
   ) => Promise<{ processed: boolean; error?: string }>;
   closeComanda: (comandaId: string) => Promise<{ success: boolean; error?: string }>;
+  refundComandaPayment: (
+    comandaId: string,
+    params: {
+      sourcePaymentId: string;
+      amountCents: number;
+      reason: string;
+      clientNonce?: string;
+    }
+  ) => Promise<{ success: boolean; alreadyProcessed?: boolean; reopened?: boolean; error?: string }>;
 
   // Locações em Grupo (Fechamento por Participantes)
   groupRentals: GroupRental[];
@@ -221,6 +240,15 @@ interface ComandasContextType {
     }
   ) => Promise<{ success: boolean; changeCents?: number; alreadyProcessed?: boolean; error?: string }>;
   closeGroupRental: (rentalId: string) => Promise<{ success: boolean; error?: string }>;
+  refundGroupRentalPayment: (
+    rentalId: string,
+    params: {
+      sourcePaymentId: string;
+      allocations: { participantId: string; amountCents: number }[];
+      reason: string;
+      clientNonce?: string;
+    }
+  ) => Promise<{ success: boolean; alreadyProcessed?: boolean; reopened?: boolean; error?: string }>;
   verifyGroupPaymentStatus: (
     rentalId: string,
     operationId: string
@@ -387,8 +415,15 @@ export function ComandasProvider({ children }: { children: ReactNode }) {
   const [storageError, setStorageError] = useState<string | null>(null);
   const [comandasLoaded, setComandasLoaded] = useState(false);
   const [groupRentalsLoaded, setGroupRentalsLoaded] = useState(false);
+  const [appointmentsLoaded, setAppointmentsLoaded] = useState(false);
+  const [productsLoaded, setProductsLoaded] = useState(false);
+  const [staffLoaded, setStaffLoaded] = useState(false);
   const [comandasSyncError, setComandasSyncError] = useState<string | null>(null);
   const [groupRentalsSyncError, setGroupRentalsSyncError] = useState<string | null>(null);
+  const [appointmentsSyncError, setAppointmentsSyncError] = useState<string | null>(null);
+  const [productsSyncError, setProductsSyncError] = useState<string | null>(null);
+  const [operatingHoursSyncError, setOperatingHoursSyncError] = useState<string | null>(null);
+  const [staffSyncError, setStaffSyncError] = useState<string | null>(null);
 
   // Módulo ativo e filtros
   const [activeModule, setActiveModule] = useState<ActiveModule>('inicio');
@@ -487,8 +522,15 @@ export function ComandasProvider({ children }: { children: ReactNode }) {
         setStaffList([]);
         setComandasLoaded(false);
         setGroupRentalsLoaded(false);
+        setAppointmentsLoaded(false);
+        setProductsLoaded(false);
+        setStaffLoaded(false);
         setComandasSyncError(null);
         setGroupRentalsSyncError(null);
+        setAppointmentsSyncError(null);
+        setProductsSyncError(null);
+        setOperatingHoursSyncError(null);
+        setStaffSyncError(null);
         return;
       }
 
@@ -514,8 +556,15 @@ export function ComandasProvider({ children }: { children: ReactNode }) {
           setStaffList([]);
           setComandasLoaded(false);
           setGroupRentalsLoaded(false);
+          setAppointmentsLoaded(false);
+          setProductsLoaded(false);
+          setStaffLoaded(false);
           setComandasSyncError(null);
           setGroupRentalsSyncError(null);
+          setAppointmentsSyncError(null);
+          setProductsSyncError(null);
+          setOperatingHoursSyncError(null);
+          setStaffSyncError(null);
           return;
         }
 
@@ -526,10 +575,27 @@ export function ComandasProvider({ children }: { children: ReactNode }) {
 
         // Se for administrador e produtos estiverem vazios, inicializa cardápio base
         if (authRes.staff.role === 'admin') {
-          initializeBaseProductsIfEmpty().catch(() => {});
+          initializeBaseProductsIfEmpty().catch(err => {
+            console.error('[Products Init Error]:', err);
+            const msg = `Erro ao inicializar o cardápio base: ${err instanceof Error ? err.message : String(err)}`;
+            setProductsSyncError(msg);
+            setStorageError(msg);
+          });
           listAllStaff()
-            .then(setStaffList)
-            .catch(() => {});
+            .then(list => {
+              setStaffList(list);
+              setStaffLoaded(true);
+              setStaffSyncError(null);
+            })
+            .catch(err => {
+              console.error('[Staff Load Error]:', err);
+              const msg = `Erro ao carregar equipe autorizada: ${err instanceof Error ? err.message : String(err)}`;
+              setStaffSyncError(msg);
+              setStorageError(msg);
+            });
+        } else {
+          setStaffLoaded(true);
+          setStaffSyncError(null);
         }
 
         // Iniciar consultas SOMENTE após autorização confirmada
@@ -551,9 +617,14 @@ export function ComandasProvider({ children }: { children: ReactNode }) {
         unsubProductsListener = subscribeToProducts(
           remoteProducts => {
             setProducts(remoteProducts);
+            setProductsLoaded(true);
+            setProductsSyncError(null);
           },
           err => {
             console.error('[Products Listener Error]:', err);
+            const msg = `Erro na sincronização de produtos: ${err.message}`;
+            setProductsSyncError(msg);
+            setStorageError(msg);
           }
         );
 
@@ -574,19 +645,27 @@ export function ComandasProvider({ children }: { children: ReactNode }) {
         unsubAppointmentsListener = subscribeToAppointments(
           remoteAppointments => {
             setAppointments(remoteAppointments);
+            setAppointmentsLoaded(true);
+            setAppointmentsSyncError(null);
           },
           err => {
             console.error('[Appointments Listener Error]:', err);
-            setStorageError(`Erro na sincronização da agenda: ${err.message}`);
+            const msg = `Erro na sincronização da agenda: ${err.message}`;
+            setAppointmentsSyncError(msg);
+            setStorageError(msg);
           }
         );
 
         unsubOperatingHoursListener = subscribeToOperatingHours(
           hours => {
             setOperatingHours(hours);
+            setOperatingHoursSyncError(null);
           },
           err => {
             console.error('[OperatingHours Listener Error]:', err);
+            const msg = `Erro na sincronização do horário de funcionamento: ${err.message}`;
+            setOperatingHoursSyncError(msg);
+            setStorageError(msg);
           }
         );
       } catch (err) {
@@ -598,6 +677,11 @@ export function ComandasProvider({ children }: { children: ReactNode }) {
         setGroupRentals([]);
         setAppointments([]);
         setOperatingHours(null);
+        setComandasLoaded(false);
+        setGroupRentalsLoaded(false);
+        setAppointmentsLoaded(false);
+        setProductsLoaded(false);
+        setStaffLoaded(false);
       }
     });
 
@@ -616,8 +700,13 @@ export function ComandasProvider({ children }: { children: ReactNode }) {
     try {
       const list = await listAllStaff();
       setStaffList(list);
+      setStaffLoaded(true);
+      setStaffSyncError(null);
     } catch (err) {
       console.error('Erro ao listar equipe:', err);
+      const msg = `Erro ao carregar equipe autorizada: ${err instanceof Error ? err.message : String(err)}`;
+      setStaffSyncError(msg);
+      setStorageError(msg);
     }
   };
 
@@ -911,6 +1000,52 @@ export function ComandasProvider({ children }: { children: ReactNode }) {
   };
 
   /**
+   * Operação Transacional: Estorno de Pagamento em Comanda (Somente Administrador)
+   */
+  const refundComandaPayment = async (
+    comandaId: string,
+    params: {
+      sourcePaymentId: string;
+      amountCents: number;
+      reason: string;
+      clientNonce?: string;
+    }
+  ): Promise<{ success: boolean; alreadyProcessed?: boolean; reopened?: boolean; error?: string }> => {
+    if (!currentStaff || !currentStaff.active || currentStaff.role !== 'admin') {
+      const msg = 'Apenas Administradores podem registrar estornos.';
+      setStorageError(msg);
+      return { success: false, error: msg };
+    }
+
+    const nonce =
+      params.clientNonce?.trim() ||
+      `ref_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+    try {
+      const res = await atomicRefundComandaPayment({
+        comandaId,
+        sourcePaymentId: params.sourcePaymentId,
+        amountCents: params.amountCents,
+        reason: params.reason,
+        clientNonce: nonce,
+        adminUid: currentStaff.uid,
+        adminName: currentStaff.name,
+      });
+
+      return {
+        success: true,
+        alreadyProcessed: res.alreadyProcessed,
+        reopened: res.reopened,
+      };
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Falha ao registrar estorno no servidor.';
+      setStorageError(message);
+      return { success: false, error: message };
+    }
+  };
+
+  /**
    * Operação Transacional: Criação de Locação em Grupo
    */
   const createGroupRental = async (params: {
@@ -1080,6 +1215,52 @@ export function ComandasProvider({ children }: { children: ReactNode }) {
       return { success: true };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Falha ao encerrar locação.';
+      setStorageError(message);
+      return { success: false, error: message };
+    }
+  };
+
+  /**
+   * Operação Transacional: Estorno de Pagamento em Locação em Grupo (Somente Administrador)
+   */
+  const refundGroupRentalPayment = async (
+    rentalId: string,
+    params: {
+      sourcePaymentId: string;
+      allocations: { participantId: string; amountCents: number }[];
+      reason: string;
+      clientNonce?: string;
+    }
+  ): Promise<{ success: boolean; alreadyProcessed?: boolean; reopened?: boolean; error?: string }> => {
+    if (!currentStaff || !currentStaff.active || currentStaff.role !== 'admin') {
+      const msg = 'Apenas Administradores podem registrar estornos.';
+      setStorageError(msg);
+      return { success: false, error: msg };
+    }
+
+    const nonce =
+      params.clientNonce?.trim() ||
+      `ref_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+    try {
+      const res = await atomicRefundGroupRentalPayment({
+        rentalId,
+        sourcePaymentId: params.sourcePaymentId,
+        allocations: params.allocations,
+        reason: params.reason,
+        clientNonce: nonce,
+        adminUid: currentStaff.uid,
+        adminName: currentStaff.name,
+      });
+
+      return {
+        success: true,
+        alreadyProcessed: res.alreadyProcessed,
+        reopened: res.reopened,
+      };
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Falha ao registrar estorno da locação.';
       setStorageError(message);
       return { success: false, error: message };
     }
@@ -1367,6 +1548,16 @@ export function ComandasProvider({ children }: { children: ReactNode }) {
           todayReceiptsCents += p.amountCents;
         }
       }
+      for (const ref of r.refunds || []) {
+        if (
+          typeof ref.amountCents === 'number' &&
+          Number.isInteger(ref.amountCents) &&
+          ref.amountCents > 0 &&
+          getSaoPauloDateKey(ref.timestamp) === currentSaoPauloDay
+        ) {
+          todayReceiptsCents -= ref.amountCents;
+        }
+      }
     }
 
     return {
@@ -1390,7 +1581,7 @@ export function ComandasProvider({ children }: { children: ReactNode }) {
       credito: 0,
     };
 
-    // 1. Recebimentos e saldo de Comandas
+    // 1. Recebimentos, estornos e saldo de Comandas
     for (const cmd of comandas) {
       const { balanceCents } = calculateComandaTotals(cmd);
 
@@ -1403,28 +1594,54 @@ export function ComandasProvider({ children }: { children: ReactNode }) {
 
       for (const p of cmd.payments) {
         const payCents =
-          typeof p.amountCents === 'number'
+          typeof p.amountCents === 'number' && Number.isInteger(p.amountCents) && p.amountCents > 0
             ? p.amountCents
-            : typeof p.amount === 'number'
-            ? Math.round(p.amount * 100)
             : 0;
 
-        if (getSaoPauloDateKey(p.timestamp) === currentSaoPauloDay) {
+        if (payCents > 0 && getSaoPauloDateKey(p.timestamp) === currentSaoPauloDay) {
           todayReceiptsCents += payCents;
           if (p.method in todayReceiptsByMethodCents) {
             todayReceiptsByMethodCents[p.method] += payCents;
           }
         }
       }
+
+      for (const ref of cmd.refunds || []) {
+        const refCents =
+          typeof ref.amountCents === 'number' && Number.isInteger(ref.amountCents) && ref.amountCents > 0
+            ? ref.amountCents
+            : 0;
+
+        if (refCents > 0 && getSaoPauloDateKey(ref.timestamp) === currentSaoPauloDay) {
+          todayReceiptsCents -= refCents;
+          if (ref.method in todayReceiptsByMethodCents) {
+            todayReceiptsByMethodCents[ref.method] -= refCents;
+          }
+        }
+      }
     }
 
-    // 2. Recebimentos consolidados de Locações em Grupo
+    // 2. Recebimentos e estornos consolidados de Locações em Grupo
     for (const r of groupRentals) {
       for (const p of r.payments || []) {
         if (getSaoPauloDateKey(p.timestamp) === currentSaoPauloDay) {
           todayReceiptsCents += p.amountCents;
           if (p.method in todayReceiptsByMethodCents) {
             todayReceiptsByMethodCents[p.method] += p.amountCents;
+          }
+        }
+      }
+
+      for (const ref of r.refunds || []) {
+        const refCents =
+          typeof ref.amountCents === 'number' && Number.isInteger(ref.amountCents) && ref.amountCents > 0
+            ? ref.amountCents
+            : 0;
+
+        if (refCents > 0 && getSaoPauloDateKey(ref.timestamp) === currentSaoPauloDay) {
+          todayReceiptsCents -= refCents;
+          if (ref.method in todayReceiptsByMethodCents) {
+            todayReceiptsByMethodCents[ref.method] -= refCents;
           }
         }
       }
@@ -1479,8 +1696,16 @@ export function ComandasProvider({ children }: { children: ReactNode }) {
         dismissStorageError,
         comandasLoaded,
         groupRentalsLoaded,
+        appointmentsLoaded,
+        productsLoaded,
+        staffLoaded,
         comandasSyncError,
         groupRentalsSyncError,
+        appointmentsSyncError,
+        productsSyncError,
+        operatingHoursSyncError,
+        staffSyncError,
+        currentSaoPauloDay,
         localBackupCount,
         adminImportLocalData,
         exportLocalData,
@@ -1498,12 +1723,14 @@ export function ComandasProvider({ children }: { children: ReactNode }) {
         registerPayment,
         verifyPaymentStatus,
         closeComanda,
+        refundComandaPayment,
         createGroupRental,
         updateParticipantName,
         adjustGroupDivision,
         linkBarComanda,
         registerGroupPayment,
         closeGroupRental,
+        refundGroupRentalPayment,
         verifyGroupPaymentStatus,
         groupRentalMetrics,
         metrics,

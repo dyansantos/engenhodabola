@@ -627,8 +627,15 @@ export function RelatoriosView() {
                 </p>
                 <p className="mt-1 text-[11px] text-slate-500 group-hover:text-emerald-800 transition-colors">
                   {aggregated.totals.count}{' '}
-                  {aggregated.totals.count === 1 ? 'recebimento' : 'recebimentos'} · Conferir →
+                  {aggregated.totals.count === 1 ? 'lançamento' : 'lançamentos'} · Conferir →
                 </p>
+                {aggregated.totals.refundedCents > 0 && (
+                  <p className="mt-1 text-[11px] font-semibold text-rose-700 tabular-nums">
+                    Inclui {aggregated.totals.refundsCount}{' '}
+                    {aggregated.totals.refundsCount === 1 ? 'estorno' : 'estornos'} (-
+                    {formatCents(aggregated.totals.refundedCents)})
+                  </p>
+                )}
               </button>
 
               {/* Bar e cozinha (Comandas) */}
