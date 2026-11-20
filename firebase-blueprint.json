@@ -1,0 +1,182 @@
+{
+  "entities": {
+    "StaffMember": {
+      "title": "StaffMember",
+      "description": "Cadastro de funcionário autorizado no sistema Engenho da Bola",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 128 },
+        "role": { "type": "string", "enum": ["admin", "operator"] },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "addedBy": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["uid", "email", "name", "role", "active", "createdAt"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Item do cardápio do bar ou cozinha do Engenho da Bola",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "name": { "type": "string", "maxLength": 128 },
+        "category": { "type": "string", "maxLength": 64 },
+        "priceCents": { "type": "integer" },
+        "description": { "type": "string", "maxLength": 256 }
+      },
+      "required": ["id", "name", "category", "priceCents"]
+    },
+    "Comanda": {
+      "title": "Comanda",
+      "description": "Comanda individual ou de mesa no bar do Engenho da Bola",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "number": { "type": "integer" },
+        "type": { "type": "string", "enum": ["individual", "mesa"] },
+        "name": { "type": "string", "maxLength": 128 },
+        "table": { "type": "string", "maxLength": 64 },
+        "responsible": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["aberta", "encerrada"] },
+        "openedAt": { "type": "string" },
+        "closedAt": { "type": "string" }
+      },
+      "required": ["id", "number", "type", "name", "status", "openedAt"]
+    },
+    "GroupRental": {
+      "title": "GroupRental",
+      "description": "Locação de quadra ou campo com fechamento dividido por participantes",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "number": { "type": "integer" },
+        "groupName": { "type": "string", "maxLength": 128 },
+        "date": { "type": "string" },
+        "time": { "type": "string", "maxLength": 64 },
+        "space": { "type": "string", "enum": ["Areia 1", "Areia 2", "Areia 3", "Society"] },
+        "totalAmountCents": { "type": "integer" },
+        "status": { "type": "string", "enum": ["aberta", "quitada", "cancelada"] },
+        "createdAt": { "type": "string" },
+        "closedAt": { "type": "string" },
+        "createdByUid": { "type": "string", "maxLength": 128 },
+        "createdByName": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["id", "number", "groupName", "date", "time", "space", "totalAmountCents", "status", "createdAt"]
+    },
+    "Receipt": {
+      "title": "Receipt",
+      "description": "Livro imutável (append-only) de recebimentos financeiros por servidor e data no fuso America/Sao_Paulo",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "origin": { "type": "string", "enum": ["comanda", "locacao"] },
+        "refId": { "type": "string", "maxLength": 128 },
+        "refNumber": { "type": "integer" },
+        "refLabel": { "type": "string", "maxLength": 200 },
+        "method": { "type": "string", "enum": ["dinheiro", "pix", "debito", "credito"] },
+        "amountCents": { "type": "integer" },
+        "paidAt": { "type": "string", "format": "date-time" },
+        "dateKey": { "type": "string", "maxLength": 10 },
+        "staffUid": { "type": "string", "maxLength": 128 },
+        "staffName": { "type": "string", "maxLength": 128 },
+        "jointPaymentId": { "type": "string", "maxLength": 128 },
+        "sourcePaymentId": { "type": "string", "maxLength": 128 },
+        "kind": { "type": "string", "enum": ["recebimento", "estorno"] }
+      },
+      "required": [
+        "id",
+        "origin",
+        "refId",
+        "refNumber",
+        "refLabel",
+        "method",
+        "amountCents",
+        "paidAt",
+        "dateKey",
+        "staffUid",
+        "staffName",
+        "sourcePaymentId",
+        "kind"
+      ]
+    },
+    "Appointment": {
+      "title": "Appointment",
+      "description": "Reserva operacional de espaço na agenda",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 200 },
+        "space": { "type": "string", "enum": ["Areia 1", "Areia 2", "Areia 3", "Society"] },
+        "date": { "type": "string" },
+        "startTime": { "type": "string" },
+        "endTime": { "type": "string" },
+        "type": { "type": "string", "enum": ["locacao_avulsa", "mensalista", "aula", "evento", "bloqueio"] },
+        "status": { "type": "string", "enum": ["confirmada", "em_andamento", "concluida", "cancelada"] }
+      },
+      "required": ["id", "title", "space", "date", "startTime", "endTime", "type", "status"]
+    },
+    "RecurringSeries": {
+      "title": "RecurringSeries",
+      "description": "Série semanal fixa de mensalistas e aulas",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "space": { "type": "string", "enum": ["Areia 1", "Areia 2", "Areia 3", "Society"] },
+        "status": { "type": "string", "enum": ["ativa", "cancelada"] }
+      },
+      "required": ["id", "space", "status"]
+    },
+    "CourtOccupancy": {
+      "title": "CourtOccupancy",
+      "description": "Documento de ocupação por espaço e data usado em transações de agenda",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "space": { "type": "string", "enum": ["Areia 1", "Areia 2", "Areia 3", "Society"] },
+        "date": { "type": "string" }
+      },
+      "required": ["id", "space", "date"]
+    }
+  },
+  "firestore": {
+    "/staff/{staffUid}": {
+      "schema": "StaffMember",
+      "description": "Funcionários e perfis de controle de acesso (Administrador e Operador)"
+    },
+    "/comandas/{comandaId}": {
+      "schema": "Comanda",
+      "description": "Armazena as comandas operacionais sincronizadas do sistema"
+    },
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Armazena os produtos do cardápio gerenciados por administradores"
+    },
+    "/group_rentals/{rentalId}": {
+      "schema": "GroupRental",
+      "description": "Armazena as locações em grupo divididas entre participantes"
+    },
+    "/receipts/{receiptId}": {
+      "schema": "Receipt",
+      "description": "Livro financeiro append-only de recebimentos de comandas e locações em grupo"
+    },
+    "/appointments/{appointmentId}": {
+      "schema": "Appointment",
+      "description": "Reservas da agenda operacional"
+    },
+    "/recurring_series/{seriesId}": {
+      "schema": "RecurringSeries",
+      "description": "Séries recorrentes de mensalistas e aulas"
+    },
+    "/court_occupancy/{occupancyId}": {
+      "schema": "CourtOccupancy",
+      "description": "Controle transacional compartilhado de ocupação por espaço e data"
+    },
+    "/metadata/{docId}": {
+      "schema": "object",
+      "description": "Contadores atômicos de numeração (operador) e configurações administrativas como agenda_config (admin)"
+    }
+  }
+}

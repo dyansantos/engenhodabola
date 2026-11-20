@@ -1,0 +1,6 @@
+{
+  "name": "Engenho da Bola",
+  "description": "Sistema de gestão integrado para o complexo esportivo, bar e cozinha Engenho da Bola.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

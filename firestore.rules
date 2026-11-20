@@ -1,0 +1,365 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Bloqueio padrão global - Nenhuma rota aberta sem autorização explícita
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    // Bootstrap inicial controlado do administrador:
+    // Mantido por email verificado porque o app não possui backend Admin SDK / Custom Claims;
+    // um documento auto-provisionável sem verificação prévia permitiria sequestro pelo primeiro login.
+    function isBootstrappedAdmin() {
+      return isSignedIn() && request.auth.token.email == 'caueoliveira46@gmail.com';
+    }
+
+    function getStaffDoc(uid) {
+      return get(/databases/$(database)/documents/staff/$(uid));
+    }
+
+    // Funcionário com cadastro ativo no banco ou administrador inicial
+    function isStaffActive() {
+      return isBootstrappedAdmin() || (
+        isSignedIn() &&
+        exists(/databases/$(database)/documents/staff/$(request.auth.uid)) &&
+        getStaffDoc(request.auth.uid).data.active == true
+      );
+    }
+
+    // Perfil Administrador: gerencia equipe, cardápio, relatórios e configurações administrativas
+    function isAdmin() {
+      return isBootstrappedAdmin() || (
+        isStaffActive() && getStaffDoc(request.auth.uid).data.role == 'admin'
+      );
+    }
+
+    // Perfil Operador ou Administrador: atende comandas, agenda e registra recebimentos
+    function isOperator() {
+      return isBootstrappedAdmin() || (
+        isStaffActive() && (
+          getStaffDoc(request.auth.uid).data.role == 'operator' ||
+          getStaffDoc(request.auth.uid).data.role == 'admin'
+        )
+      );
+    }
+
+    // Utilitários de data no fuso America/Sao_Paulo (UTC-3 fixo no Brasil desde 2019)
+    function pad2(n) {
+      return [
+        '00', '01', '02', '03', '04', '05', '06', '07', '08', '09',
+        '10', '11', '12', '13', '14', '15', '16', '17', '18', '19',
+        '20', '21', '22', '23', '24', '25', '26', '27', '28', '29',
+        '30', '31'
+      ][n];
+    }
+
+    function saoPauloDateKeyLocal(localTs) {
+      return string(localTs.year()) + '-' + pad2(localTs.month()) + '-' + pad2(localTs.day());
+    }
+
+    function saoPauloDateKey(ts) {
+      return saoPauloDateKeyLocal(ts - duration.value(3, 'h'));
+    }
+
+    // Garante que arrays financeiros e de auditoria (payments, history) só cresçam ao final
+    function isListAppendOnly(incList, extList) {
+      return incList is list && extList is list && incList.size() >= extList.size() && (
+        extList.size() == 0 || incList[0 : extList.size()] == extList
+      );
+    }
+
+    // Preserva priceCents, id e productId de itens já lançados em comandas
+    function itemImmutableAt(incItems, extItems, idx) {
+      return extItems.size() <= idx || (
+        incItems[idx].id == extItems[idx].id &&
+        incItems[idx].productId == extItems[idx].productId &&
+        incItems[idx].priceCents == extItems[idx].priceCents
+      );
+    }
+
+    function itemMatchSameOrNext(incItems, extItems, idx) {
+      return incItems.size() <= idx || (
+        (incItems[idx].id == extItems[idx].id &&
+         incItems[idx].productId == extItems[idx].productId &&
+         incItems[idx].priceCents == extItems[idx].priceCents) ||
+        (extItems.size() > idx + 1 &&
+         incItems[idx].id == extItems[idx + 1].id &&
+         incItems[idx].productId == extItems[idx + 1].productId &&
+         incItems[idx].priceCents == extItems[idx + 1].priceCents)
+      );
+    }
+
+    function itemPricesPreservedOnGrow(incItems, extItems) {
+      return itemImmutableAt(incItems, extItems, 0) && itemImmutableAt(incItems, extItems, 1)
+        && itemImmutableAt(incItems, extItems, 2) && itemImmutableAt(incItems, extItems, 3)
+        && itemImmutableAt(incItems, extItems, 4) && itemImmutableAt(incItems, extItems, 5)
+        && itemImmutableAt(incItems, extItems, 6) && itemImmutableAt(incItems, extItems, 7)
+        && itemImmutableAt(incItems, extItems, 8) && itemImmutableAt(incItems, extItems, 9)
+        && itemImmutableAt(incItems, extItems, 10) && itemImmutableAt(incItems, extItems, 11)
+        && itemImmutableAt(incItems, extItems, 12) && itemImmutableAt(incItems, extItems, 13)
+        && itemImmutableAt(incItems, extItems, 14) && itemImmutableAt(incItems, extItems, 15)
+        && itemImmutableAt(incItems, extItems, 16) && itemImmutableAt(incItems, extItems, 17)
+        && itemImmutableAt(incItems, extItems, 18) && itemImmutableAt(incItems, extItems, 19);
+    }
+
+    function itemPricesPreservedOnSingleRemove(incItems, extItems) {
+      return itemMatchSameOrNext(incItems, extItems, 0) && itemMatchSameOrNext(incItems, extItems, 1)
+        && itemMatchSameOrNext(incItems, extItems, 2) && itemMatchSameOrNext(incItems, extItems, 3)
+        && itemMatchSameOrNext(incItems, extItems, 4) && itemMatchSameOrNext(incItems, extItems, 5)
+        && itemMatchSameOrNext(incItems, extItems, 6) && itemMatchSameOrNext(incItems, extItems, 7)
+        && itemMatchSameOrNext(incItems, extItems, 8) && itemMatchSameOrNext(incItems, extItems, 9)
+        && itemMatchSameOrNext(incItems, extItems, 10) && itemMatchSameOrNext(incItems, extItems, 11)
+        && itemMatchSameOrNext(incItems, extItems, 12) && itemMatchSameOrNext(incItems, extItems, 13)
+        && itemMatchSameOrNext(incItems, extItems, 14) && itemMatchSameOrNext(incItems, extItems, 15)
+        && itemMatchSameOrNext(incItems, extItems, 16) && itemMatchSameOrNext(incItems, extItems, 17)
+        && itemMatchSameOrNext(incItems, extItems, 18) && itemMatchSameOrNext(incItems, extItems, 19);
+    }
+
+    function comandaItemsPricesImmutable(incItems, extItems) {
+      return incItems == extItems || (
+        incItems is list && extItems is list && (
+          (incItems.size() >= extItems.size() && itemPricesPreservedOnGrow(incItems, extItems)) ||
+          (incItems.size() + 1 == extItems.size() && itemPricesPreservedOnSingleRemove(incItems, extItems)) ||
+          (incItems.size() + 1 < extItems.size())
+        )
+      );
+    }
+
+    function validComandaUpdate(inc, ext) {
+      return inc.id == ext.id
+        && inc.number == ext.number
+        && ext.status == 'aberta'
+        && inc.status in ['aberta', 'encerrada']
+        && isListAppendOnly(inc.payments, ext.payments)
+        && isListAppendOnly(inc.history, ext.history)
+        && (
+          inc.payments == ext.payments || (
+            inc.items == ext.items &&
+            inc.payments.size() == ext.payments.size() + 1 &&
+            inc.payments[ext.payments.size()].amountCents is int &&
+            inc.payments[ext.payments.size()].amountCents > 0
+          )
+        )
+        && comandaItemsPricesImmutable(inc.items, ext.items);
+    }
+
+    function validGroupRentalUpdate(inc, ext) {
+      return inc.id == ext.id
+        && inc.number == ext.number
+        && inc.totalAmountCents == ext.totalAmountCents
+        && inc.status in ['aberta', 'quitada', 'cancelada']
+        && isListAppendOnly(inc.payments, ext.payments)
+        && isListAppendOnly(inc.history, ext.history)
+        && (ext.status == 'aberta' || (isAdmin() && inc.payments == ext.payments))
+        && (
+          inc.payments == ext.payments || (
+            ext.status == 'aberta' &&
+            inc.payments.size() == ext.payments.size() + 1 &&
+            inc.payments[ext.payments.size()].amountCents is int &&
+            inc.payments[ext.payments.size()].amountCents > 0
+          )
+        );
+    }
+
+    function validCounterWrite(inc, currentResource) {
+      return inc.keys().hasAll(['lastNumber', 'updatedAt'])
+        && inc.keys().hasOnly(['lastNumber', 'updatedAt'])
+        && inc.lastNumber is int
+        && inc.lastNumber > 0
+        && inc.updatedAt is string
+        && (
+          currentResource == null ||
+          !('lastNumber' in currentResource.data) ||
+          inc.lastNumber >= currentResource.data.lastNumber
+        );
+    }
+
+    function validReceiptPayload(receiptId, data) {
+      return data.keys().hasAll([
+          'id', 'origin', 'refId', 'refNumber', 'refLabel', 'method',
+          'amountCents', 'paidAt', 'dateKey', 'staffUid', 'staffName',
+          'sourcePaymentId', 'kind'
+        ])
+        && data.keys().hasOnly([
+          'id', 'origin', 'refId', 'refNumber', 'refLabel', 'method',
+          'amountCents', 'paidAt', 'dateKey', 'staffUid', 'staffName',
+          'jointPaymentId', 'sourcePaymentId', 'kind'
+        ])
+        && data.id == receiptId
+        && data.origin in ['comanda', 'locacao']
+        && isValidId(data.refId)
+        && data.refNumber is int && data.refNumber > 0
+        && data.refLabel is string && data.refLabel.size() > 0 && data.refLabel.size() <= 200
+        && data.method in ['dinheiro', 'pix', 'debito', 'credito']
+        && data.amountCents is int && data.amountCents > 0
+        && data.paidAt is timestamp
+        && data.dateKey is string && data.dateKey.matches('^\\d{4}-\\d{2}-\\d{2}$')
+        && data.staffUid is string && data.staffUid.size() <= 128
+        && data.staffName is string && data.staffName.size() > 0 && data.staffName.size() <= 128
+        && data.sourcePaymentId is string && data.sourcePaymentId.size() > 0 && data.sourcePaymentId.size() <= 128
+        && data.kind in ['recebimento', 'estorno']
+        && (!('jointPaymentId' in data) || (data.jointPaymentId is string && data.jointPaymentId.size() > 0 && data.jointPaymentId.size() <= 128));
+    }
+
+    function matchesOriginPaymentAfter(beforeDoc, afterDoc, data) {
+      return beforeDoc.data.payments is list
+        && afterDoc.data.payments is list
+        && afterDoc.data.payments.size() == beforeDoc.data.payments.size() + 1
+        && afterDoc.data.payments[beforeDoc.data.payments.size()].id == data.sourcePaymentId
+        && afterDoc.data.payments[beforeDoc.data.payments.size()].amountCents == data.amountCents
+        && afterDoc.data.payments[beforeDoc.data.payments.size()].method == data.method;
+    }
+
+    function isLiveTransactionReceipt(data) {
+      return isOperator()
+        && data.kind == 'recebimento'
+        && data.staffUid == request.auth.uid
+        && data.paidAt == request.time
+        && data.dateKey == saoPauloDateKey(request.time)
+        && (
+          (data.origin == 'comanda'
+            && exists(/databases/$(database)/documents/comandas/$(data.refId))
+            && existsAfter(/databases/$(database)/documents/comandas/$(data.refId))
+            && matchesOriginPaymentAfter(
+                 get(/databases/$(database)/documents/comandas/$(data.refId)),
+                 getAfter(/databases/$(database)/documents/comandas/$(data.refId)),
+                 data
+               ))
+          ||
+          (data.origin == 'locacao'
+            && exists(/databases/$(database)/documents/group_rentals/$(data.refId))
+            && existsAfter(/databases/$(database)/documents/group_rentals/$(data.refId))
+            && matchesOriginPaymentAfter(
+                 get(/databases/$(database)/documents/group_rentals/$(data.refId)),
+                 getAfter(/databases/$(database)/documents/group_rentals/$(data.refId)),
+                 data
+               ))
+        );
+    }
+
+    function isAdminBackfillReceipt(data) {
+      return isAdmin()
+        && data.kind == 'recebimento'
+        && data.paidAt <= request.time
+        && data.dateKey == saoPauloDateKey(data.paidAt)
+        && (
+          (data.origin == 'comanda' && exists(/databases/$(database)/documents/comandas/$(data.refId))) ||
+          (data.origin == 'locacao' && exists(/databases/$(database)/documents/group_rentals/$(data.refId)))
+        );
+    }
+
+    // Coleção de Funcionários (Equipe e Controle de Acesso ABAC)
+    match /staff/{staffUid} {
+      allow get: if isSignedIn() && (request.auth.uid == staffUid || isAdmin());
+      allow list: if isAdmin();
+
+      allow create: if (
+        isBootstrappedAdmin() && request.auth.uid == staffUid &&
+        incoming().role == 'admin' &&
+        incoming().email == 'caueoliveira46@gmail.com'
+      ) || (
+        isAdmin() && isValidId(staffUid) &&
+        incoming().role in ['admin', 'operator']
+      );
+
+      allow update: if isAdmin() && isValidId(staffUid);
+      allow delete: if isAdmin() && isValidId(staffUid) && request.auth.uid != staffUid;
+    }
+
+    // Metadados do Sistema:
+    // Operadores só podem atualizar contadores de numeração; configurações (ex: agenda_config) são exclusivas do Admin.
+    match /metadata/{docId} {
+      allow get: if isStaffActive() && isValidId(docId);
+      allow list: if isAdmin();
+
+      allow create, update: if isValidId(docId) && (
+        (docId in ['comandas_counter', 'group_rentals_counter'] && isOperator() && validCounterWrite(incoming(), resource))
+        || isAdmin()
+      );
+
+      allow delete: if isAdmin() && isValidId(docId);
+    }
+
+    // Coleção de Comandas Operacionais
+    match /comandas/{comandaId} {
+      allow get, list: if isStaffActive();
+
+      allow create: if isOperator() && isValidId(comandaId)
+        && incoming().id == comandaId
+        && incoming().status == 'aberta'
+        && incoming().payments is list && incoming().payments.size() == 0
+        && incoming().items is list
+        && incoming().history is list;
+
+      allow update: if isOperator() && isValidId(comandaId) && validComandaUpdate(incoming(), existing());
+      allow delete: if isAdmin() && isValidId(comandaId);
+    }
+
+    // Coleção de Produtos (Cardápio e Preços)
+    match /products/{productId} {
+      allow get, list: if isStaffActive();
+      allow create, update, delete: if isAdmin() && isValidId(productId);
+    }
+
+    // Coleção de Locações em Grupo (Fechamento por Participantes)
+    match /group_rentals/{rentalId} {
+      allow get, list: if isStaffActive();
+
+      allow create: if isOperator() && isValidId(rentalId)
+        && incoming().id == rentalId
+        && incoming().status == 'aberta'
+        && incoming().payments is list && incoming().payments.size() == 0
+        && incoming().history is list
+        && incoming().totalAmountCents is int && incoming().totalAmountCents > 0;
+
+      allow update: if isOperator() && isValidId(rentalId) && validGroupRentalUpdate(incoming(), existing());
+      allow delete: if isAdmin() && isValidId(rentalId);
+    }
+
+    // Livro Append-Only de Recebimentos Financeiros (Leitura exclusiva do Administrador)
+    match /receipts/{receiptId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(receiptId)
+        && validReceiptPayload(receiptId, incoming())
+        && (isLiveTransactionReceipt(incoming()) || isAdminBackfillReceipt(incoming()));
+      allow update, delete: if false;
+    }
+
+    // Coleção da Agenda Operacional (Agendamentos e Reservas de Espaços)
+    match /appointments/{appointmentId} {
+      allow get, list: if isStaffActive();
+      allow create, update: if isOperator() && isValidId(appointmentId);
+      allow delete: if isAdmin() && isValidId(appointmentId);
+    }
+
+    // Coleção de Séries Recorrentes (Mensalistas e Aulas Fixas)
+    match /recurring_series/{seriesId} {
+      allow get, list: if isStaffActive();
+      allow create, update: if isOperator() && isValidId(seriesId);
+      allow delete: if isAdmin() && isValidId(seriesId);
+    }
+
+    // Controle Atômico de Ocupação da Agenda (Prevenção de Colisões Simultâneas)
+    match /court_occupancy/{occupancyId} {
+      allow get, list: if isStaffActive();
+      allow create, update: if isOperator() && isValidId(occupancyId);
+      allow delete: if isAdmin() && isValidId(occupancyId);
+    }
+  }
+}
